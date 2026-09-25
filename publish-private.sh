@@ -146,15 +146,17 @@ done
 (cd "$out" && sha256sum -- *.tar.gz >SHA256SUMS)
 cat "$out/SHA256SUMS"
 
-# Draft first, publish last, so a failed upload leaves a deletable draft rather than a release
-# build.rs resolves `latest` to and finds half of.
-echo ">> releasing $tag on $PREBUILT_REPO"
+# Draft first, and published only after the public tag is pushed: build.rs resolves `latest`, so
+# a failure at any step before the last leaves a deletable draft — never a `latest` with half its
+# files, or one whose source tag does not exist.
+echo ">> releasing $tag on $PREBUILT_REPO (draft)"
 gh release create "$tag" --repo "$PREBUILT_REPO" --draft \
   --title "FFmpeg ${FFMPEG_VERSION} libavcodec (HEVC decoder) static archives - ${stamp}" \
   --notes "Built from ${origin%.git}/commit/${sha}" \
   "$out"/SHA256SUMS "$out"/*.tar.gz
-gh release edit "$tag" --repo "$PREBUILT_REPO" --draft=false
 
 git tag "$tag" "$sha"
 git push origin "refs/tags/$tag"
+
+gh release edit "$tag" --repo "$PREBUILT_REPO" --draft=false
 echo ">> published $tag"

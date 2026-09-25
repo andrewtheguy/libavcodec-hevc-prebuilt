@@ -30,7 +30,9 @@
 //!      once more with SIMD on and off and the MD5 check off, the pair whose timings show the
 //!      kernels are dispatched;
 //!   6. with the loop filters skipped, the in-band MD5 check **fails** — proving it was live;
-//!   7. a stream cut off at 60% ends cleanly, and every frame it did output is still right.
+//!   7. a stream cut off at 60% drains to EOF with at most one error, and outputs reference
+//!      pictures in display order — all but the one picture the cut landed in, which FFmpeg
+//!      conceals and outputs, and which nothing sent before the cut can reference.
 //!
 //! Nothing here is a benchmark, and no timing is asserted — a CI runner's clock is not a fact
 //! about the decoder. The `-md5` rows are printed, with the SIMD speed-up they imply, because
@@ -234,19 +236,33 @@ fn main() {
         );
         rows.push(row(stream, NO_LOOP_FILTER, &run, reference.len()));
 
-        // (7) A truncated stream: ends, does not crash, and is right up to where it was cut.
+        // (7) A truncated stream. Not a prefix of the reference: a picture before the cut in
+        // decode order can be after pictures that were cut off in display order (main outputs
+        // 0..=20, the cut picture, then 24). So each output frame must be the *next* reference
+        // picture it matches, and only the one picture the cut landed in may match none.
         let run = decode(stream, TRUNCATED);
-        let intact = first_mismatch(&run.frames, &reference).unwrap_or(run.frames.len());
         assert!(
-            run.frames.len() <= reference.len(),
-            "{}: a truncated stream decoded to more frames ({}) than the whole one ({})",
+            run.eof,
+            "{}: the drained decoder never returned AVERROR_EOF after a cut at 60%",
+            stream.name
+        );
+        assert!(
+            run.errors.len() <= 1 && run.errors.iter().all(|&e| e == AVERROR_INVALIDDATA),
+            "{}: a cut at 60% returned {} — at most one AVERROR_INVALIDDATA, for the cut picture",
             stream.name,
-            run.frames.len(),
-            reference.len()
+            describe(&run.errors)
+        );
+        let (intact, damaged) = in_order(&run.frames, &reference);
+        assert!(
+            damaged <= 1,
+            "{}: {damaged} of {} frames after a cut at 60% are not reference pictures in display \
+             order — only the picture the cut landed in may be wrong",
+            stream.name,
+            run.frames.len()
         );
         assert!(
             intact * 3 >= reference.len(),
-            "{}: only {intact} of the frames before a cut at 60% were right",
+            "{}: only {intact} reference pictures came out of a cut at 60%",
             stream.name
         );
         rows.push(row(stream, TRUNCATED, &run, reference.len()));
@@ -401,7 +417,8 @@ struct Run {
 }
 
 fn row(stream: &Stream, setup: Setup, run: &Run, expected: usize) -> String {
-    let exact = run.frames.iter().zip(stream.reference.lines()).filter(|(a, b)| a == b).count();
+    let reference: Vec<&str> = stream.reference.lines().collect();
+    let (exact, _) = in_order(&run.frames, &reference);
     format!(
         "| {:6} | {:11} | {:3}/{:<2} | {:5} | {:6} | {:8} |",
         stream.name,
@@ -414,6 +431,19 @@ fn row(stream: &Stream, setup: Setup, run: &Run, expected: usize) -> String {
     )
 }
 
+/// Match `frames` against `reference` as a subsequence, in order: (frames that are the next
+/// reference picture after the previous match, frames that are no later reference picture).
+fn in_order(frames: &[String], reference: &[&str]) -> (usize, usize) {
+    let (mut next, mut matched) = (0, 0);
+    for frame in frames {
+        if let Some(i) = reference[next..].iter().position(|r| r == frame) {
+            next += i + 1;
+            matched += 1;
+        }
+    }
+    (matched, frames.len() - matched)
+}
+
 fn first_mismatch(frames: &[String], reference: &[&str]) -> Option<usize> {
     frames.iter().zip(reference).position(|(a, b)| a != b)
 }
@@ -424,9 +454,15 @@ fn decode(stream: &Stream, setup: Setup) -> Run {
         Run { frames: Vec::new(), errors: Vec::new(), eof: false, micros: 0, hash_micros: 0 };
     let input = &stream.bytes[..(stream.bytes.len() as f64 * setup.keep) as usize];
 
+    // av_parser_parse2 reads up to AV_INPUT_BUFFER_PADDING_SIZE bytes past the `len` it is
+    // given, and expects them zero — which neither the end of an include_bytes! nor the next
+    // piece of the stream is. So each piece is copied into a buffer that has them.
+    let padding = AV_INPUT_BUFFER_PADDING_SIZE as usize;
+    let mut buf = vec![0u8; setup.chunk + padding];
+
     // SAFETY: every object is created here, used only on this thread, and freed exactly once at
     // the end. The parser's output buffer is sent (and copied by libavcodec, since the packet is
-    // not reference-counted) before the parser is called again.
+    // not reference-counted) before the parser is called again, and before `buf` is refilled.
     unsafe {
         // Process-wide, and read by each DSP init when the decoder opens: -1 restores detection.
         av_force_cpu_flags(if setup.simd { -1 } else { 0 });
@@ -453,7 +489,9 @@ fn decode(stream: &Stream, setup: Setup) -> Run {
 
         let started = Instant::now();
         for chunk in input.chunks(setup.chunk) {
-            let mut rest = chunk;
+            buf[..chunk.len()].copy_from_slice(chunk);
+            buf[chunk.len()..].fill(0);
+            let mut rest = &buf[..chunk.len()];
             while !rest.is_empty() {
                 let (used, out, size) = parse(parser, ctx, rest.as_ptr(), rest.len());
                 rest = &rest[used..];
@@ -486,8 +524,8 @@ fn decode(stream: &Stream, setup: Setup) -> Run {
 ///
 /// # Safety
 ///
-/// `parser` and `ctx` must be live; `data` must point at `len` readable bytes, or be null with
-/// `len` 0 to flush.
+/// `parser` and `ctx` must be live; `data` must point at `len` readable bytes followed by
+/// `AV_INPUT_BUFFER_PADDING_SIZE` zeroed ones, or be null with `len` 0 to flush.
 unsafe fn parse(
     parser: *mut AVCodecParserContext,
     ctx: *mut AVCodecContext,

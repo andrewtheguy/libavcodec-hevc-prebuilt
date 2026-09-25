@@ -171,7 +171,8 @@ HEVC decoder and parser, and the CPU flags; then decodes both streams — 8-bit 
 the parser, with SIMD on, with SIMD off, with four frame threads and with four slice threads, and
 requires every frame to match, with the stream's in-band MD5 picture hashes verified
 (`AV_EF_CRCCHECK | AV_EF_EXPLODE`). It proves that check is live (skipping the loop filters must
-fail it), and that a stream cut at 60% ends cleanly with every frame before the cut still right.
+fail it), and that a stream cut at 60% drains to EOF with at most one error and outputs reference
+pictures in display order — every one but the picture the cut landed in, which FFmpeg conceals.
 
 ## Local loop
 
@@ -211,8 +212,9 @@ builds all four targets on machines of the operator's own, at once, each passing
 The sibling [`devtools`](https://github.com/andrewtheguy/devtools) checkout does the travelling.
 What travels is `git archive HEAD`, so nothing uncommitted or ignored can reach an archive. Then
 the archives and their `SHA256SUMS` go to a release of the private archive repository — draft
-first, publish last, so a failed upload leaves a deletable draft rather than a `latest` with half
-its files. All four or no release.
+first, and published only after this repository's tag is pushed, so a failed upload or push leaves
+a deletable draft rather than a `latest` with half its files or no source tag. All four or no
+release.
 
 Not a workflow, for two reasons: a public repository's workflow artifacts can be downloaded by
 anyone with a GitHub account, which is a way of publishing the binaries; and a private

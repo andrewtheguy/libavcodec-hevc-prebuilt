@@ -13,6 +13,10 @@
 //      build links the archives of the release current when it runs rather than whichever one
 //      this machine happened to download first.
 //
+// (2) and (3) must also *be* this checkout's archives: their MANIFEST's `ffmpeg`, `commit` and
+// `target` lines are held to ffmpeg.env and the target. `prebuilt/` is ignored by git, so a
+// branch switch or a version bump leaves the old one there, and it would otherwise link.
+//
 // The archives are not public — fdk-aac-prebuilt's model: this repository publishes the source
 // of the build, and `./publish-private.sh` builds the archives on the operator's own machines
 // and uploads them to a repository only its collaborators can read. That is why (3) goes through
@@ -50,6 +54,11 @@ fn main() {
     let (prefix, provenance) = resolve(&manifest, &target, &version);
     let lib_dir = prefix.join("lib");
     let text = read_manifest(&prefix, &provenance);
+    if provenance != OVERRIDE {
+        let commit = ffmpeg_env(&manifest, "FFMPEG_COMMIT");
+        let name = prebuilt_dir(&target);
+        check_identity(text.as_deref(), &prefix, &provenance, name, &version, &commit);
+    }
 
     // libavcodec first: it references libavutil, and a single-pass linker resolves left to right.
     for name in ["avcodec", "avutil"] {
@@ -116,6 +125,36 @@ fn read_manifest(prefix: &Path, provenance: &str) -> Option<String> {
              repository publishes carries one.",
             prefix.display(),
         ),
+    }
+}
+
+/// Require the MANIFEST to be of this checkout's FFmpeg, for this target.
+///
+/// The library hashes below prove the files are the ones the MANIFEST describes; this proves the
+/// MANIFEST describes the right build. Without it a stale `prebuilt/<target>/` — ignored by git,
+/// so it survives a branch switch or a bump of ffmpeg.env — links the old FFmpeg while
+/// `PREBUILT_VERSION` reports the new one.
+fn check_identity(
+    text: Option<&str>,
+    prefix: &Path,
+    provenance: &str,
+    name: &str,
+    version: &str,
+    commit: &str,
+) {
+    for (key, expected) in [("ffmpeg", version), ("commit", commit), ("target", name)] {
+        let actual = manifest_line(text, key).map(str::trim);
+        if actual != Some(expected) {
+            panic!(
+                "\n\n{} (from {provenance}) is not this checkout's archive.\n\
+                 \x20 its MANIFEST says {key} {}\n\
+                 \x20 this checkout is  {key} {expected}\n\n\
+                 It is left over from another version or branch. Run ./build.sh {name} and \
+                 ./sync-prebuilt.sh, or delete that directory.\n",
+                prefix.display(),
+                actual.unwrap_or("(no such line)"),
+            );
+        }
     }
 }
 
