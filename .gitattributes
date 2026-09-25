@@ -1,0 +1,7 @@
+# LF on every checkout. Git for Windows defaults to CRLF checkouts, and the headers and bindings
+# checks compare the committed bytes against freshly generated LF ones.
+* text=auto eol=lf
+
+# The e2e fixtures are bitstreams whose per-frame hashes are committed beside them; git must
+# never normalise a byte of them, whatever its binary detection guesses.
+*.hevc binary

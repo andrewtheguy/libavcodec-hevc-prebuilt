@@ -1,0 +1,19 @@
+# The Rust half of this repository: an FFI crate that links the prebuilt archives ./build.sh
+# produces, instead of asking every consumer to install FFmpeg, nasm and a C toolchain, or to
+# run bindgen.
+#
+# Two members rather than one. The second is not a library at all — it is a *consumer*, built
+# and run by the pipeline on every target, because linking the archives into a binary that
+# executes and decodes real HEVC bit-exactly is a different claim from compiling a test.
+#
+# There is deliberately no safe-wrapper crate, for the same reason libde265-prebuilt has none: a
+# decoder loop has one shape per use, and crates/libavcodec-hevc-e2e/src/main.rs is a complete
+# example of it.
+[workspace]
+members = ["crates/libavcodec-hevc-prebuilt-sys", "crates/libavcodec-hevc-e2e"]
+resolver = "2"
+
+[workspace.package]
+# Not FFmpeg's version — that is in ffmpeg.env, and a consumer pins this by git tag anyway.
+# This number moves when the *crates* change shape.
+version = "0.1.0"

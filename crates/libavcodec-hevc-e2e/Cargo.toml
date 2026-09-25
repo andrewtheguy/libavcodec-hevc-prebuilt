@@ -1,0 +1,10 @@
+[package]
+name = "libavcodec-hevc-e2e"
+version.workspace = true
+edition = "2021"
+description = "Decodes committed HEVC streams with the prebuilt libavcodec and holds every frame to the committed reference hashes, so the pipeline proves the archives work rather than that they link"
+license = "LGPL-2.1-or-later"
+publish = false
+
+[dependencies]
+avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", path = "../libavcodec-hevc-prebuilt-sys" }

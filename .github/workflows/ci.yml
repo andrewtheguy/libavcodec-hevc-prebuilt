@@ -1,0 +1,60 @@
+name: CI
+
+# What runs on every push: the cheap checks that do not need an archive, and then one real
+# target built and exercised end to end.
+#
+# The second half is `uses: ./.github/workflows/build.yml` rather than a copy of its steps. The
+# thing worth checking on a push is that the pipeline still works, and a second implementation of
+# it would be a thing that can pass while the pipeline does not. `targets: x86_64` keeps it to
+# one runner; the others are a `workflow_dispatch` away and are gated on every release
+# regardless.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # Every script in this repository is bash, and every one of them is `set -euo pipefail`
+      # over paths that can contain anything. shellcheck is what makes that claim true rather
+      # than intended.
+      - name: shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          # `-x` so it *follows* the sourced files rather than reporting each one as unknown.
+          shellcheck -x build.sh sync-prebuilt.sh check-static.sh source.sh ci/unix/ci.sh \
+            crates/libavcodec-hevc-prebuilt-sys/gen-bindings.sh crates/libavcodec-hevc-e2e/gen-testdata.sh
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      # That each committed reference is still what the runner's own ffmpeg — the distribution's,
+      # not the pinned build this repository ships — makes of the committed stream beside it.
+      # The e2e binary trusts these hashes absolutely, so the claim that they come from outside
+      # this build is checked rather than remembered. Decoding is exactly specified, so
+      # whichever ffmpeg the runner installs must agree.
+      - name: The e2e references are ffmpeg's decode
+        run: |
+          sudo apt-get install -y ffmpeg
+          crates/libavcodec-hevc-e2e/gen-testdata.sh --check
+
+      # No clippy here. Every crate in this workspace links the archive, so clippy cannot run
+      # until one has been built — which is what the build job below does, and where clippy
+      # therefore lives.
+
+  # The pipeline itself, on one target, including the bindings check its `plan` job runs.
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      targets: x86_64

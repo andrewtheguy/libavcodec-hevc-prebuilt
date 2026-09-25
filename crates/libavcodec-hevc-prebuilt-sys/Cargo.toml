@@ -1,0 +1,29 @@
+[package]
+name = "libavcodec-hevc-prebuilt-sys"
+version.workspace = true
+edition = "2021"
+# 2021, not 2024, and no MSRV-raising syntax: this crate's whole job is to be linkable from other
+# people's projects. 1.77 because bindgen writes the layout assertions in src/bindings.rs with
+# `std::mem::offset_of!`; gen-bindings.sh pins `--rust-target` to 1.81 so it does not emit the
+# `unsafe extern "C"` blocks 1.82 would need. Check this after a bindgen bump.
+rust-version = "1.77"
+description = "Raw FFI for FFmpeg's HEVC decoder (libavcodec + libavutil, HEVC decoder and parser only), linked from prebuilt static archives — no FFmpeg install, no nasm, no C toolchain, no libclang"
+# FFmpeg's licence for this configuration, as a real SPDX identifier: what a licence scanner
+# should see is the licence of what ends up in the binary. It is the *Lesser* GPL, and a static
+# link carries its relinking obligations into every binary that uses this crate; the README
+# spells them out.
+license = "LGPL-2.1-or-later"
+repository = "https://github.com/andrewtheguy/libavcodec-hevc-prebuilt"
+# Declared so that two crates linking libavcodec into one binary is a cargo error rather than a
+# duplicate-symbol link error, and so consumers can read DEP_AVCODEC_INCLUDE.
+links = "avcodec"
+build = "build.rs"
+# git-only, deliberately: the archives are what makes this crate work and they live on releases.
+publish = false
+
+# `avcodec_hevc_sys`, so a consumer writes `use avcodec_hevc_sys::…`.
+[lib]
+name = "avcodec_hevc_sys"
+path = "src/lib.rs"
+
+[dependencies]
