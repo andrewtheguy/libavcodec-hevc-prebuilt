@@ -5,7 +5,7 @@
 #   ./sync-prebuilt.sh              copy dist/* into the crate's prebuilt/ cache
 #   ./sync-prebuilt.sh --headers    refresh the committed headers and the generated bindings
 #   ./sync-prebuilt.sh --check      verify the committed headers and bindings
-#   ./sync-prebuilt.sh --fetch      download the latest release's archives into prebuilt/
+#   ./sync-prebuilt.sh --fetch      download the latest private release's archives into prebuilt/
 #
 # Neither `prebuilt/` nor `dist/` is committed — see .gitignore. Two things *are*:
 #
@@ -125,18 +125,17 @@ case "${1:-}" in
 
   --fetch)
     # Whatever the latest release holds — the same thing build.rs would fetch, including the
-    # SHA256SUMS check.
-    base="https://github.com/$PREBUILT_REPO/releases/latest/download"
+    # SHA256SUMS check. Through `gh`, as build.rs does, because the archive repository is private.
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
 
-    echo ">> SHA256SUMS"
-    curl -sSL --fail --max-time 300 -o "$tmp/SHA256SUMS" "$base/SHA256SUMS"
+    gh release download --repo "$PREBUILT_REPO" --dir "$tmp" \
+      --pattern SHA256SUMS --pattern "libavcodec-hevc-${FFMPEG_VERSION}-*.tar.gz"
 
     for target in "${targets[@]}"; do
       asset="libavcodec-hevc-${FFMPEG_VERSION}-${target}.tar.gz"
+      [ -f "$tmp/$asset" ] || { echo "the latest release has no $asset" >&2; exit 1; }
       echo ">> $asset"
-      curl -sSL --fail --max-time 300 -o "$tmp/$asset" "$base/$asset"
 
       expected="$(awk -v a="$asset" '$2 == a || $2 == "./" a { print $1 }' "$tmp/SHA256SUMS")"
       [ -n "$expected" ] || { echo "SHA256SUMS does not list $asset" >&2; exit 1; }

@@ -9,13 +9,18 @@ avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", git = "https://gi
 ```
 
 The crate's `[lib] name` is `avcodec_hevc_sys`, so the calls read
-`avcodec_hevc_sys::avcodec_send_packet(…)`.
+`avcodec_hevc_sys::avcodec_send_packet(…)`. The tag pins the *crate*; the archives come from the
+latest release of the private archive repository.
 
-No configure, no nasm, no C compiler, no pkg-config, no libclang, and nothing to set in the
-environment. `build.rs` downloads the archives for its target from this repository's latest
-release, checks them, and emits the link flags. There is one variable,
-`LIBAVCODEC_HEVC_PREBUILT_DIR`, and it is an opt-in override for archives you built yourself
-([below](#local-loop)).
+**The archives are not public** — the model fdk-aac-prebuilt uses. This repository publishes the
+source of the build and no binary of it: the archives live in the releases of a private
+repository, [`andrewtheguy/libavcodec-hevc-prebuilt-archives`](https://github.com/andrewtheguy/libavcodec-hevc-prebuilt-archives),
+and `build.rs` reads them through **`gh`**, for whoever is logged in (`gh auth login`, or
+`GH_TOKEN`) to an account that can see it. Anyone else builds the archives with `./build.sh` and
+points `LIBAVCODEC_HEVC_PREBUILT_DIR` at them ([below](#local-loop)).
+
+With access, there is no configure, no nasm, no C compiler, no pkg-config and no libclang:
+`build.rs` downloads the archives for its target, checks them, and emits the link flags.
 
 This is the FFmpeg twin of [libde265-prebuilt](https://github.com/andrewtheguy/libde265-prebuilt)
 and [libvpx-prebuilt](https://github.com/andrewtheguy/libvpx-prebuilt), and follows them closely:
@@ -29,11 +34,12 @@ pinned commit into `build/` (gitignored) at build time.
 ## Layout
 
 ```
-ffmpeg.env                           the pin: version, commit, source repo, release repo
+ffmpeg.env                           the pin: version, commit, source repo, private archive repo
 source.sh                            fetch the pinned commit, assert it; the feature switches
 build.sh <target>                    configure, make, verify, write dist/<target>/MANIFEST
 sync-prebuilt.sh                     dist/ -> the crate's cache; --headers; --check; --fetch
 check-static.sh <binary>             assert a finished binary carries libavcodec and links none
+publish-private.sh                   build all four targets on the operator's machines, release them
 crates/libavcodec-hevc-prebuilt-sys/ the FFI crate: committed headers, committed bindings, build.rs
 crates/libavcodec-hevc-e2e/          a consumer that decodes committed HEVC streams bit-exactly
 ci/unix/, ci/windows/                the build.yml rows, runnable here and on the remote builders
@@ -114,8 +120,8 @@ names — `__isoc99_sscanf`, `__xpg_strerror_r`, the LFS64 aliases (`open64`, `f
 ffmpeg.env pins a commit
   -> source.sh fetches that commit, asserts HEAD and its RELEASE file, refuses a dirty tree
     -> build.sh compiles that tree and writes sha256 of both libraries into a MANIFEST
-      -> the release publishes the archives plus SHA256SUMS
-        -> build.rs verifies the download against SHA256SUMS
+      -> publish-private.sh releases the archives plus SHA256SUMS, privately
+        -> build.rs downloads them with gh and verifies them against SHA256SUMS
           -> and the extracted libraries against the MANIFEST beside them, on every path
 ```
 
@@ -183,16 +189,39 @@ ci` on the linux/arm64 build box and `ci/unix/remote.sh -H macvm ci` on the Mac,
 `ci/windows/remote.ps1 ci` on the Windows box. Or a `workflow_dispatch` on **Build
 libavcodec-hevc**.
 
-`./sync-prebuilt.sh --fetch` pulls the latest release's archives instead.
+`./sync-prebuilt.sh --fetch` pulls the latest private release's archives instead (through `gh`).
 `LIBAVCODEC_HEVC_PREBUILT_DIR` points `build.rs` at a prefix you built yourself — the escape hatch
 for an unsupported target, musl, or more of FFmpeg — and `build.rs` warns that nothing about it
 was checked.
 
-## Bootstrapping
+## Releasing
 
-The download paths cannot pass before the first release exists, so on a fresh fork: run **Build
-libavcodec-hevc** by hand (`workflow_dispatch`, `targets: all`), then **Release libavcodec-hevc
-archives**.
+`./publish-private.sh`, run by hand on a Linux x86_64 machine, from a commit that is pushed. It
+builds all four targets on machines of the operator's own, at once, each passing the gate
+`build.yml` applies — `build.sh`'s own verification, the link, clippy, the e2e binary and
+`check-static.sh` — on the machine that built it:
+
+| builder | target | how |
+|---|---|---|
+| the machine running it | `linux-x86_64` | natively, `ci/unix/ci.sh` |
+| the devtools arm64 builder (remote-lxc) | `linux-aarch64` | `ci/unix/remote.sh -a` |
+| `$LIBAVCODEC_HEVC_PREBUILT_MACOS_HOST` (default `macvm`) | `macos-arm64` | `ci/unix/remote.sh -H` |
+| the Windows CI box | `windows-x86_64-msvc` | MSVC, `ci/windows/ci.ps1` |
+
+The sibling [`devtools`](https://github.com/andrewtheguy/devtools) checkout does the travelling.
+What travels is `git archive HEAD`, so nothing uncommitted or ignored can reach an archive. Then
+the archives and their `SHA256SUMS` go to a release of the private archive repository — draft
+first, publish last, so a failed upload leaves a deletable draft rather than a `latest` with half
+its files. All four or no release.
+
+Not a workflow, for two reasons: a public repository's workflow artifacts can be downloaded by
+anyone with a GitHub account, which is a way of publishing the binaries; and a private
+repository's runners are billed by the minute. `build.yml` still runs every target on GitHub
+(`workflow_dispatch`), as a test that uploads nothing.
+
+The tag is computed, never typed: `v<ffmpeg>-<YYYYMMDDHHMMSS>-<short sha>`. It is created twice —
+on the archive repository, as the release, and here, as a plain git tag with no release, which is
+what a consumer's manifest names.
 
 ## Which library got linked
 

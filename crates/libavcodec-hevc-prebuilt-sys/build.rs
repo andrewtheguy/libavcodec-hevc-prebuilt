@@ -7,15 +7,22 @@
 //   1. `LIBAVCODEC_HEVC_PREBUILT_DIR` — a prefix you built or unpacked yourself. Used as-is.
 //   2. `prebuilt/<target>/` next to this file — what `./build.sh` + `./sync-prebuilt.sh` leave
 //      behind, and gitignored.
-//   3. the repository's **latest** GitHub release, downloaded into
+//   3. the **latest** release of the private archive repository (`PREBUILT_REPO` in
+//      ffmpeg.env), downloaded with `gh` into
 //      `$CARGO_HOME/libavcodec-hevc-prebuilt/<release tag>/` — one directory per release, so a
 //      build links the archives of the release current when it runs rather than whichever one
 //      this machine happened to download first.
 //
+// The archives are not public — fdk-aac-prebuilt's model: this repository publishes the source
+// of the build, and `./publish-private.sh` builds the archives on the operator's own machines
+// and uploads them to a repository only its collaborators can read. That is why (3) goes through
+// `gh` — it carries the login that a plain GET cannot — and why (3) is nobody else's path:
+// anyone without that access builds with ./build.sh and takes (1) or (2).
+//
 // Two things get hashed on the way in, and neither hash is committed to this repository:
 //
-//   - the downloaded `.tar.gz`, against the `SHA256SUMS` asset the release job publishes beside
-//     the archives;
+//   - the downloaded `.tar.gz`, against the `SHA256SUMS` asset publish-private.sh publishes
+//     beside the archives;
 //   - each extracted library, against the `sha256(avcodec)` and `sha256(avutil)` lines of the
 //     MANIFEST inside the archive — on every resolution path, not just the download.
 //
@@ -333,26 +340,19 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Which release `latest` is, right now.
 ///
-/// `https://github.com/<repo>/releases/latest` redirects to `…/releases/tag/<tag>`, so the answer
-/// is the Location header and nothing else is transferred: a HEAD, no body, and none of
-/// `api.github.com`'s sixty-requests-an-hour ceiling for the unauthenticated. The alternative is
-/// asking the API and parsing JSON, in a build script whose whole selling point is that it
-/// compiles no dependencies.
+/// Asked through `gh`, because the archive repository is private: github.com answers an
+/// anonymous request for it with a 404, release or no release, and `gh` is what holds a login
+/// that can see it — its own, or `GH_TOKEN` where there is no keyring.
 ///
-/// `None` means **cannot ask**, never *no release*: cargo was told it is offline, or curl could
-/// not reach GitHub, or the redirect was not one of these. The caller then falls back to the
-/// newest release this machine already has, and the provenance line says that is what happened.
+/// `None` means **cannot ask**, never *no release*: cargo was told it is offline, or there is no
+/// `gh`, or it is not logged in to an account that can read the repository, or GitHub did not
+/// answer. The caller then falls back to the newest release this machine already has, and the
+/// provenance line says that is what happened.
 fn latest_release_tag(repo: &str) -> Option<String> {
     if std::env::var("CARGO_NET_OFFLINE").as_deref() == Ok("true") {
         println!("cargo:info=cargo is offline — using the newest cached release of libavcodec");
         return None;
     }
-
-    let url = format!("https://github.com/{repo}/releases/latest");
-    let out = Command::new("curl")
-        .args(["-sS", "--fail", "--head", "--max-time", "30", "--retry", "2", &url])
-        .output()
-        .unwrap_or_else(|e| panic!("cannot run curl: {e}"));
 
     // A warning rather than a panic: a network that did not answer must not fail a build that
     // has a usable archive, and a warning rather than nothing because the archive it falls back
@@ -365,28 +365,24 @@ fn latest_release_tag(repo: &str) -> Option<String> {
         );
         None
     };
+    let out = match gh()
+        .args(["release", "view", "--repo", repo, "--json", "tagName", "--jq", ".tagName"])
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => return stale(format!("cannot run gh: {e}")),
+    };
     if !out.status.success() {
-        return stale(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        // One line: a `cargo:warning` ends at the first newline.
+        let why = String::from_utf8_lossy(&out.stderr);
+        return stale(why.split_whitespace().collect::<Vec<_>>().join(" "));
     }
-    // Read the header instead of asking curl's `--write-out` for `redirect_url`: the curl 8.8.0
-    // shipped in Windows Server returns CURLE_BAD_FUNCTION_ARGUMENT (43) for every `-w`, even
-    // though this same HEAD succeeds. A reverse search also selects the final response if a
-    // proxy prepends its own header block.
-    let headers = String::from_utf8_lossy(&out.stdout);
-    let Some(location) = headers.lines().rev().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case("location").then_some(value.trim())
-    }) else {
-        return stale(format!("{url} returned no Location header"));
-    };
-    let Some((_, tag)) = location.rsplit_once("/releases/tag/") else {
-        return stale(format!("{url} redirected to '{location}'"));
-    };
+    let tag = String::from_utf8_lossy(&out.stdout).trim().to_string();
     // The tag becomes a directory name below, so it may not be one that names somewhere else.
     if tag.is_empty() || tag.starts_with('.') || tag.contains(['/', '\\']) {
         return stale(format!("'{tag}' is not a usable directory name"));
     }
-    Some(tag.to_string())
+    Some(tag)
 }
 
 /// The newest cached release of this version, for a machine that cannot ask which one is current —
@@ -417,9 +413,10 @@ fn offline_cache(name: &str, version: &str) -> (PathBuf, String) {
             (path, format!("cache/{tag}/{name}, not revalidated"))
         }
         None => panic!(
-            "no cached FFmpeg {version} libavcodec for {name}, and no current release of it can be \
-             downloaded (the warning above says why). Run ./build.sh {name} && \
-             ./sync-prebuilt.sh, or set {OVERRIDE} to a prefix containing lib/."
+            "no cached FFmpeg {version} libavcodec for {name}, and which release is current \
+             cannot be asked (the warning above says why). The archives are private: with \
+             access to them, log in with `gh auth login`. Without, run ./build.sh {name} in a \
+             checkout of this repository and set {OVERRIDE} to its dist/{name}."
         ),
     }
 }
@@ -427,37 +424,38 @@ fn offline_cache(name: &str, version: &str) -> (PathBuf, String) {
 /// Download one target's archive from a named release and unpack it into the cache.
 fn fetch(repo: &str, name: &str, version: &str, tag: &str, cached: &Path) -> PathBuf {
     let asset = format!("libavcodec-hevc-{version}-{name}.tar.gz");
-    let base = format!("https://github.com/{repo}/releases/download/{tag}");
 
-    // Staged under a pid-suffixed name so two cargo builds racing here cannot read each other's
-    // half-written tarball. The loser of the race throws its copy away below.
+    // Staged under a pid-suffixed name so two cargo builds racing here cannot read each
+    // other's half-written tarball. The loser of the race throws its copy away below.
     let staging = cached.with_extension(format!("tmp{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).expect("cannot create the cache directory");
     let tarball = staging.join(&asset);
     let sums = staging.join("SHA256SUMS");
 
-    println!("cargo:info=fetching {base}/{asset}");
-    if !curl(&format!("{base}/{asset}"), &tarball) {
-        panic!("cannot download {base}/{asset}");
-    }
-    // Both URLs name the same release rather than resolving `latest` a second time, so a
-    // release published while the archive is in flight cannot swap it out from under the
-    // checksums that are about to be read.
-    if !curl(&format!("{base}/SHA256SUMS"), &sums) {
+    // One call for both files, and both by the release's name rather than `latest` a second
+    // time, so a release published while the archive is in flight cannot swap it out from
+    // under the checksums that are about to be read.
+    println!("cargo:info=fetching {asset} from {repo} {tag}");
+    let downloaded = gh()
+        .args(["release", "download", tag, "--repo", repo])
+        .args(["--pattern", &asset, "--pattern", "SHA256SUMS", "--dir"])
+        .arg(&staging)
+        .status()
+        .unwrap_or_else(|e| panic!("cannot run gh: {e}"))
+        .success();
+    if !downloaded || !tarball.is_file() || !sums.is_file() {
         panic!(
-            "cannot download {base}/SHA256SUMS
-
-Every release publishes one beside the \
-             archives. If {tag} predates that, run this repository's release workflow \
-             again, or set {OVERRIDE} to a prefix you built yourself."
+            "cannot download {asset} and SHA256SUMS from {repo} {tag}. Try again, or run \
+             ./build.sh {name} in a checkout of this repository and set {OVERRIDE} to its \
+             dist/{name}."
         );
     }
     verify_download(&sums, &asset, &tarball, tag);
 
-    // `tar` rather than a Rust tar crate: it is present on macOS, on every Linux image that can
-    // run cargo, and in System32 on Windows 10 1803 and later, and a build dependency here
-    // would be one every consumer compiles.
+    // `tar` rather than a Rust tar crate: it is present on macOS, on every Linux image that
+    // can run cargo, and in System32 on Windows 10 1803 and later, and a build dependency
+    // here would be one every consumer compiles.
     run(Command::new("tar").arg("xzf").arg(&tarball).arg("-C").arg(&staging));
     std::fs::remove_file(&tarball).ok();
     std::fs::remove_file(&sums).ok();
@@ -505,16 +503,13 @@ fn verify_download(sums: &Path, asset: &str, tarball: &Path, tag: &str) {
     println!("cargo:info=libavcodec {asset} matches SHA256SUMS ({actual})");
 }
 
-/// `curl` one URL into one file, reporting whether it worked rather than dying, so that each
-/// caller can say what a failure means.
-fn curl(url: &str, out: &Path) -> bool {
-    Command::new("curl")
-        .args(["-sSL", "--fail", "--max-time", "300", "--retry", "3", "-o"])
-        .arg(out)
-        .arg(url)
-        .status()
-        .unwrap_or_else(|e| panic!("cannot run curl: {e}"))
-        .success()
+/// `gh`, without the `DEBUG` cargo sets for every build script to say which profile this is:
+/// `gh` reads the same variable as a request to trace its HTTP traffic onto stderr, which is
+/// where the one sentence that says why it failed is supposed to be.
+fn gh() -> Command {
+    let mut cmd = Command::new("gh");
+    cmd.env_remove("DEBUG");
+    cmd
 }
 
 fn run(cmd: &mut Command) {

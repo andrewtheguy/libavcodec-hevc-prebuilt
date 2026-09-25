@@ -1,18 +1,16 @@
 name: Build libavcodec-hevc
 
-# Build every archive and test it. This workflow never publishes — releasing is release.yml,
-# which calls this one and then does the publishing part. Two triggers instead of one, so that
-# "does it build and pass" can be asked at any time without anybody being committed to a release
-# by asking.
+# Build every archive and test it — on GitHub's runners, and publishing nothing. Releasing is
+# publish-private.sh, run by hand on the operator's own machines, which uploads to the private
+# archive repository; this workflow is the check that the pipeline still works, askable at any
+# time without anybody being committed to a release by asking.
 #
-# `workflow_dispatch` is the test loop and the bootstrap: the very first run of this repository's
-# pipeline has to be this workflow, because nothing can be downloaded from a release that does
-# not exist yet. It is also how the macOS and Windows archives get exercised at all, since
-# ./build.sh builds only the machine it runs on.
+# `workflow_dispatch` is how the macOS, Windows and arm64 rows get exercised on GitHub at all,
+# since ./build.sh builds only the machine it runs on.
 #
-# `workflow_call` is release.yml and ci.yml. A failure anywhere in here — a build, the link test,
-# the e2e binary, `check-static.sh`, the reproducibility check — fails the caller's job, and for
-# release.yml that means the release never happens.
+# `workflow_call` is ci.yml, which runs the x86_64 row on every push. A failure anywhere in here —
+# a build, the link test, the e2e binary, `check-static.sh`, the reproducibility check — fails
+# the caller's job.
 on:
   workflow_dispatch:
     inputs:
@@ -28,8 +26,7 @@ on:
         type: string
         default: all
 
-# Read-only. The token that can create a release belongs to the job that creates one, and that
-# job is in the other file.
+# Read-only: nothing here publishes.
 permissions:
   contents: read
 
@@ -195,14 +192,12 @@ jobs:
           LIBCLANG_PATH: 'C:\Program Files\LLVM\bin'
         run: ./sync-prebuilt.sh --check
 
+      # And no upload of the archive. This repository is public, and so are its workflow
+      # artifacts — downloadable by anyone with a GitHub account, which would be a way of
+      # publishing the binaries that publish-private.sh keeps to collaborators. The MANIFEST is
+      # the record of what was built.
       - name: Show what was built
         run: cat dist/${{ matrix.target }}/MANIFEST
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: libavcodec-hevc-${{ matrix.target }}
-          path: dist/${{ matrix.target }}
-          if-no-files-found: error
 
   # Does the same source, built twice on the same image, produce the same library?
   #
