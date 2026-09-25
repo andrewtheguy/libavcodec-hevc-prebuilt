@@ -115,7 +115,10 @@ case "$target" in
     # consumer's final link. Read back off the objects' `/DEFAULTLIB` directives below.
     #
     # Win32 threads rather than pthreads: FFmpeg's own `w32pthreads.h` shim, no library needed.
-    configure_args+=(--enable-w32threads --extra-cflags=-MD)
+    #
+    # **`-Brepro`**: cl otherwise stamps every object's COFF header with the time it was compiled,
+    # which was the only difference between two builds of one commit (see "Reproducibility" below).
+    configure_args+=(--enable-w32threads "--extra-cflags=-MD -Brepro")
     floor='x86-64 baseline (runtime CPU detection: sse2..avx2 kernels dispatched at run time)'
     lib_prefix=''
     lib_suffix=.lib
@@ -150,9 +153,19 @@ esac
 # gets an abbreviated hash whose length depends on the git that ran it. `REVISION` on make's
 # command line overrides that with the release number, which is what `av_version_info()` then
 # returns and what the e2e binary asserts. configure itself already asks GNU ar for its
-# deterministic mode (`rcD`) where ar has one. Apple's ar and MSVC's lib.exe stamp their members,
-# so only the Linux archives are byte-reproducible and CI checks linux-x86_64.
+# deterministic mode (`rcD`) where ar has one.
+#
+# MSVC's tools stamp the time into their output by default, and two Windows builds of one commit
+# differed in exactly that and nothing else: each object's COFF `TimeDateStamp` and each archive
+# member's header date. Three switches remove it: cl's `-Brepro` (with `-MD` above), nasm's
+# `--reproducible` — through `NASMENV`, which nasm reads as extra options, because setting
+# `X86ASMFLAGS` on make's command line would override the include flags common.mak appends to
+# it — and lib's `-Brepro`, through `ARFLAGS`, which only library.mak reads.
 make_vars=("REVISION=$FFMPEG_VERSION")
+if [ "$msvc" = 1 ]; then
+  make_vars+=("ARFLAGS=-nologo -Brepro")
+  export NASMENV=--reproducible
+fi
 
 rm -rf "$out" "build/$target"
 mkdir -p "build/$target"

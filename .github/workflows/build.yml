@@ -201,11 +201,11 @@ jobs:
 
   # Does the same source, built twice on the same image, produce the same library?
   #
-  # linux-x86_64 only, and that is a measurement rather than laziness. FFmpeg compiles no
-  # `__DATE__`, its version string is fixed by build.sh's REVISION, and its configure asks GNU ar
-  # for deterministic members (`rcD`). Apple's ar cannot, and lib.exe stamps its members, so those
-  # archives differ between builds by design and this job would fail on them for a reason that
-  # is not a defect.
+  # linux-x86_64 only, as the cheap runner. FFmpeg compiles no `__DATE__`, its version string is
+  # fixed by build.sh's REVISION, and its configure asks GNU ar for deterministic members (`rcD`).
+  # The other three targets reproduce too — measured across two releases' builds of one FFmpeg on
+  # the operator's machines, the Windows one since build.sh passes MSVC's tools their
+  # reproducible switches (see "Reproducibility" there).
   reproducible:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.targets).*.target, 'linux-x86_64')
