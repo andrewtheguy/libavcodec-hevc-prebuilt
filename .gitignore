@@ -1,0 +1,22 @@
+# Fetched source, build trees, and the libraries themselves. build/ffmpeg-<version>/ is FFmpeg's
+# tree at the pinned commit, fetched by source.sh at build time — this repository is not a fork
+# of FFmpeg and carries none of its source. Nothing built belongs in git either: the release
+# assets are the artifacts, and a committed .a is one nobody can tell apart from the one CI made.
+build/
+dist/
+.DS_Store
+
+# The same rule, applied to the Rust half. `prebuilt/` is a cache: ./sync-prebuilt.sh fills it
+# from dist/, and failing that the sys crate's build.rs downloads what it needs from the latest
+# release. The directory itself is kept (an empty .gitkeep): build.rs watches it with
+# rerun-if-changed, and a watched path that does not exist reruns the build script every time.
+crates/libavcodec-hevc-prebuilt-sys/prebuilt/*
+!crates/libavcodec-hevc-prebuilt-sys/prebuilt/.gitkeep
+target/
+Cargo.lock
+
+# Per-checkout notes for Claude Code; anything that holds for everyone belongs in AGENTS.md.
+CLAUDE.local.md
+
+# Scratch for the Windows CI driver (ci/windows/remote.ps1 stages its upload here).
+tmp/
