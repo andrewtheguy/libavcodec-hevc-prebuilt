@@ -1,0 +1,239 @@
+name: Build libavcodec-hevc
+
+# Build every archive and test it. This workflow never publishes — releasing is release.yml,
+# which calls this one and then does the publishing part. Two triggers instead of one, so that
+# "does it build and pass" can be asked at any time without anybody being committed to a release
+# by asking.
+#
+# `workflow_dispatch` is the test loop and the bootstrap: the very first run of this repository's
+# pipeline has to be this workflow, because nothing can be downloaded from a release that does
+# not exist yet. It is also how the macOS and Windows archives get exercised at all, since
+# ./build.sh builds only the machine it runs on.
+#
+# `workflow_call` is release.yml and ci.yml. A failure anywhere in here — a build, the link test,
+# the e2e binary, `check-static.sh`, the reproducibility check — fails the caller's job, and for
+# release.yml that means the release never happens.
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "which targets to build and test"
+        type: choice
+        default: all
+        options: [all, windows, x86_64, arm64]
+  workflow_call:
+    inputs:
+      targets:
+        description: "which targets to build and test"
+        type: string
+        default: all
+
+# Read-only. The token that can create a release belongs to the job that creates one, and that
+# job is in the other file.
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      targets: ${{ steps.matrix.outputs.targets }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # That the committed headers are the pinned FFmpeg's (installed by its own configure and
+      # `make install-headers`, compiling nothing), and that src/bindings.rs is what those
+      # headers say. Cheap, and it runs before four compilers do.
+      #
+      # bindgen is installed rather than assumed: `--check` regenerates, and it refuses to run
+      # under a version other than the one the committed file was made with.
+      - name: Install the pinned bindgen
+        run: |
+          sudo apt-get update && sudo apt-get install -y libclang-dev
+          cargo install bindgen-cli --version 0.72.1 --locked
+      - run: ./sync-prebuilt.sh --check
+
+      # The matrix, narrowed here as *data* rather than by a job-level `if`: a job-level
+      # condition cannot reference `matrix` at all, and filtering before the fan-out means a
+      # `targets: x86_64` dispatch starts one runner instead of four.
+      - id: matrix
+        env:
+          GROUP: ${{ inputs.targets || 'all' }}
+        run: |
+          all='[
+            {"target":"macos-arm64",         "runs-on":"macos-latest",    "group":"arm64"},
+            {"target":"linux-x86_64",        "runs-on":"ubuntu-24.04",    "group":"x86_64"},
+            {"target":"linux-aarch64",       "runs-on":"ubuntu-24.04-arm","group":"arm64"},
+            {"target":"windows-x86_64-msvc", "runs-on":"windows-latest",  "group":"windows"}
+          ]'
+          targets="$(jq -c --arg g "$GROUP" '[.[] | select($g == "all" or .group == $g)]' <<<"$all")"
+          echo "$targets" | jq -r '.[].target' | sed 's/^/  /'
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+          echo "count=$(jq 'length' <<<"$targets")" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    strategy:
+      # No fail-fast: one target failing to configure is exactly the case where the other
+      # logs are the useful comparison.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.targets) }}
+    runs-on: ${{ matrix.runs-on }}
+    # Every `run:` under bash, on the Windows runner too — there it is Git's bash, and only the
+    # steps marked `shell: msys2 {0}` (build.sh and the bindings check) run in the MSYS2 shell set
+    # up below: FFmpeg's configure and Makefile want make and a POSIX shell that Git's bash does
+    # not fully provide. `path-type: inherit` is what lets that shell see the runner's cargo, the
+    # MSVC developer environment and LLVM.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      # The one system package this repository needs anywhere, and only on the *builder*: every
+      # x86_64 SIMD kernel in FFmpeg is nasm assembly. configure refuses to continue without it,
+      # and build.sh then counts the kernels in the finished archive. Nothing a *consumer* does
+      # needs this. (arm64's NEON is `.S` files the C compiler assembles.)
+      - name: Install nasm (Linux x86_64)
+        if: matrix.target == 'linux-x86_64'
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
+      # Windows: the developer environment puts cl, link and lib on PATH, which FFmpeg's MSVC
+      # toolchain drives directly.
+      - name: Enter a VS developer environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      # rustc takes link.exe from PATH once a developer environment is active, and in Git's bash
+      # PATH's link.exe is coreutils' link(1) from usr\bin. Name the real one to cargo for every
+      # later step, whatever shell runs it. (build.sh does the same for configure, by PATH.)
+      - name: Point cargo at MSVC's linker (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          link="$(cygpath -u "$VCToolsInstallDir")bin/Hostx64/x64/link.exe"
+          test -x "$link" || { echo "::error::no link.exe at $link"; exit 1; }
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$(cygpath -w "$link")" >> "$GITHUB_ENV"
+      - name: Set up the MSYS2 shell
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          path-type: inherit
+          install: make nasm diffutils
+      - name: Show the Windows toolchain
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          nasm -v; make --version | head -1
+          cl 2>&1 | head -1
+          llvm-nm --version | sed -n 2p
+      - name: Show the toolchain
+        if: runner.os != 'Windows'
+        run: |
+          cc --version | head -1
+          if [ "${{ matrix.target }}" = linux-x86_64 ]; then nasm -v; fi
+
+      - name: Build ${{ matrix.target }}
+        if: runner.os != 'Windows'
+        run: ./build.sh ${{ matrix.target }}
+      - name: Build ${{ matrix.target }} (MSYS2 shell)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: ./build.sh ${{ matrix.target }}
+
+      # The half of the artifact the archive alone does not cover: whether Rust can *link* it.
+      # That is what breaks in practice — a missing libm or pthread, a Windows system library
+      # FFmpeg reaches for, a static-CRT object — and none of it shows up in a successful make.
+      # `--offline`, after sync-prebuilt.sh, also demonstrates the claim consumers care about:
+      # once the archive exists, no build needs a network.
+      - name: Link against it
+        run: |
+          ./sync-prebuilt.sh
+          cargo build --offline --release --workspace
+
+      # Here rather than in ci.yml's cheap-checks job, because every crate in this workspace
+      # links the archives and clippy cannot run until they exist.
+      - name: clippy
+        run: cargo clippy --offline --release --all-targets -- -D warnings
+
+      # The end-to-end leg: a release binary that is a *consumer* of the crate, decoding the
+      # committed streams on the runner's own processor, with its SIMD and without, and holding
+      # every frame to the committed reference.
+      - name: End to end — decode bit-exactly in a real binary
+        run: |
+          bin=target/release/libavcodec-hevc-e2e
+          [ -f "$bin" ] || bin="$bin.exe"
+          "$bin"
+          ./check-static.sh "$bin"
+
+      # And that the committed headers are the ones this artifact's own `make install` produced —
+      # the membership half of the chain, which needs a built target to check and so cannot run
+      # in `plan`.
+      - name: The committed headers are the installed set
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          sudo apt-get update && sudo apt-get install -y libclang-dev
+          cargo install bindgen-cli --version 0.72.1 --locked
+          ./sync-prebuilt.sh --check
+
+      # The same check on Windows is what keeps `bindings_windows.rs` honest: it is regenerated
+      # here against the Windows SDK's headers (libclang from the runner's LLVM) and must match
+      # the committed file, the way `plan` checks the other one on Linux.
+      # bindgen is installed from PowerShell, not the MSYS2 shell: there `/usr/bin/link`
+      # (coreutils) shadows MSVC's link.exe and every build script fails to link.
+      - name: Install bindgen (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo install bindgen-cli --version 0.72.1 --locked
+      - name: The committed Windows bindings are what the headers say
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          LIBCLANG_PATH: 'C:\Program Files\LLVM\bin'
+        run: ./sync-prebuilt.sh --check
+
+      - name: Show what was built
+        run: cat dist/${{ matrix.target }}/MANIFEST
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libavcodec-hevc-${{ matrix.target }}
+          path: dist/${{ matrix.target }}
+          if-no-files-found: error
+
+  # Does the same source, built twice on the same image, produce the same library?
+  #
+  # linux-x86_64 only, and that is a measurement rather than laziness. FFmpeg compiles no
+  # `__DATE__`, its version string is fixed by build.sh's REVISION, and its configure asks GNU ar
+  # for deterministic members (`rcD`). Apple's ar cannot, and lib.exe stamps its members, so those
+  # archives differ between builds by design and this job would fail on them for a reason that
+  # is not a defect.
+  reproducible:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.targets).*.target, 'linux-x86_64')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install nasm
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - name: Build it twice and compare the libraries
+        run: |
+          ./build.sh linux-x86_64 >/dev/null
+          first="$(grep '^sha256(' dist/linux-x86_64/MANIFEST)"
+          # A different build directory is not enough — the point is a *clean* second build, so
+          # nothing can be reused from the first.
+          rm -rf build/linux-x86_64 dist/linux-x86_64
+          ./build.sh linux-x86_64 >/dev/null
+          second="$(grep '^sha256(' dist/linux-x86_64/MANIFEST)"
+          echo "first:";  echo "$first"
+          echo "second:"; echo "$second"
+          [ "$first" = "$second" ] || {
+            echo "::error::two builds of the same source produced different libraries"
+            exit 1
+          }
+          echo "reproducible"
