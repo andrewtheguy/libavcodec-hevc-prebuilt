@@ -6,8 +6,8 @@ name: CI
 # The second half is `uses: ./.github/workflows/build.yml` rather than a copy of its steps. The
 # thing worth checking on a push is that the pipeline still works, and a second implementation of
 # it would be a thing that can pass while the pipeline does not. `targets: x86_64` keeps it to
-# one runner; the others are a `workflow_dispatch` away and are gated on every release
-# regardless.
+# one runner; the others are a `workflow_dispatch` away, and every release gates all four on the
+# machines that build them (publish-private.sh).
 on:
   push:
     branches: ["**"]
@@ -33,7 +33,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
           # `-x` so it *follows* the sourced files rather than reporting each one as unknown.
-          shellcheck -x build.sh sync-prebuilt.sh check-static.sh source.sh ci/unix/ci.sh \
+          shellcheck -x build.sh sync-prebuilt.sh check-static.sh source.sh publish-private.sh ci/unix/ci.sh \
             crates/libavcodec-hevc-prebuilt-sys/gen-bindings.sh crates/libavcodec-hevc-e2e/gen-testdata.sh
 
       - name: rustfmt

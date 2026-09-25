@@ -9,7 +9,7 @@ Every crate here links the archives, so cargo cannot build until they exist:
 ./sync-prebuilt.sh      # dist/ -> crates/libavcodec-hevc-prebuilt-sys/prebuilt/
 ```
 
-`./sync-prebuilt.sh --fetch` is the alternative once a release exists. Neither `clippy` nor
+`./sync-prebuilt.sh --fetch` (through `gh`, private repo) is the alternative once a release exists. Neither `clippy` nor
 `test` works without one of the two, which is why CI runs clippy inside the build job rather
 than beside it. x86_64 builds need `nasm`.
 
@@ -23,14 +23,18 @@ measuring what it produces; the point of the MANIFEST is that every claim in it 
 artifact. Don't run `./build.sh` locally while a remote driver is packing the tree — it deletes
 `build/<target>` under the packer.
 
-`src/bindings_windows.rs` is generated on Windows only (`ci/windows/ci.ps1` regenerates it; bring
-it back with `ci/windows/remote.ps1 fetch crates\libavcodec-hevc-prebuilt-sys\src <dest>`).
+`src/bindings_windows.rs` is generated on Windows only. `ci/windows/ci.ps1` checks it and, when it
+is stale, regenerates it and fails; bring the new one back with
+`ci/windows/remote.ps1 fetch crates\libavcodec-hevc-prebuilt-sys\src <dest>` and commit it.
 
-## Bootstrapping order
+## Releasing
 
-The download paths cannot pass before a release exists. On a fresh fork: run **Build
-libavcodec-hevc** (`workflow_dispatch`, `targets: all`) by hand, then **Release libavcodec-hevc
-archives**.
+`./publish-private.sh` on Linux x86_64, from a pushed commit: it builds all four targets on the
+operator's machines (here, remote-lxc, macvm, the Windows box) through `../devtools`, and uploads
+them to the **private** `PREBUILT_REPO` (ffmpeg.env). This public repository gets only the git
+tag. There is no release workflow, and `build.yml` uploads no artifacts — a public repository's
+artifacts are downloadable by anyone. `build.rs` and `sync-prebuilt.sh --fetch` read releases
+through `gh`, so they need a login with access to the archive repository.
 
 ## What not to "fix"
 

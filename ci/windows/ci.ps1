@@ -1,7 +1,7 @@
 # The Windows row of .github/workflows/build.yml, run natively on the CI box by
 # ci/windows/remote.ps1 (`remote.ps1 ci`): build.sh in an MSYS2 shell (make, nasm) inside a Visual
-# Studio developer environment, then the Windows bindings regenerated against this machine's
-# SDK, then link, test and run the consumer binary. When this file and the workflow disagree, the
+# Studio developer environment, then the Windows bindings checked against this machine's SDK,
+# then link, test and run the consumer binary. When this file and the workflow disagree, the
 # workflow is right and this is stale — it exists to say what CI will say before CI is asked.
 #
 # PowerShell 7. Installs nothing; the machine is provisioned by remotex's ci/windows/provision.ps1.
@@ -42,16 +42,16 @@ if ($env:CARGO_TARGET_DIR) { Write-Host "   CARGO_TARGET_DIR=$env:CARGO_TARGET_D
 Invoke-Bash 'nasm -v; make --version | head -1; llvm-nm --version | sed -n 2p'
 
 Invoke-Step 'build.sh windows-x86_64-msvc' { Invoke-Bash './build.sh windows-x86_64-msvc' }
-# Before the cargo build rather than after it: the crate compiles `bindings_windows.rs` on this
-# target, so the file has to exist — and regenerated rather than `--check`ed, because the box is
-# where the Windows file is *made*; the diff against the committed one is read back on the
-# driving machine (`remote.ps1 fetch crates\libavcodec-hevc-prebuilt-sys\src <dest>`).
-Invoke-Step 'bindings_windows.rs from this SDK' {
+# The committed Windows bindings against what this machine's SDK makes of the headers — before
+# the cargo build, which compiles them. A mismatch fails the run (and so a publish-private.sh
+# release), but the regenerated file is left in the workspace, so the fix is to bring it back
+# with `remote.ps1 fetch crates\libavcodec-hevc-prebuilt-sys\src <dest>` and commit it.
+Invoke-Step 'bindings_windows.rs is what this SDK makes' {
     # cargo install from PowerShell, not from the MSYS shell: there `/usr/bin/link` (coreutils)
     # shadows MSVC's link.exe and every build script fails to link.
     & cargo install bindgen-cli --version 0.72.1 --locked
     if ($LASTEXITCODE -ne 0) { return }
-    Invoke-Bash 'cd crates/libavcodec-hevc-prebuilt-sys && ./gen-bindings.sh'
+    Invoke-Bash 'cd crates/libavcodec-hevc-prebuilt-sys && { ./gen-bindings.sh --check || { ./gen-bindings.sh; exit 1; }; }'
 }
 Invoke-Step 'sync-prebuilt.sh' { Invoke-Bash './sync-prebuilt.sh' }
 Invoke-Step 'cargo build' { & cargo build --release --workspace }
