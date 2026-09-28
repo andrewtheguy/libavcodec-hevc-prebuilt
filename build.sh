@@ -443,12 +443,12 @@ frameworks=()
 case "$target" in
   macos-*)
     sdk="$(xcrun --show-sdk-path)"
-    for name in $(grep -oE -- '-framework [A-Za-z]+' <<<"$extralibs" | awk '{print $2}' | sort -u); do
+    while read -r name; do
       tbd="$sdk/System/Library/Frameworks/$name.framework/$name.tbd"
       [ -f "$tbd" ] || { echo "the SDK has no $tbd for FFmpeg's -framework $name" >&2; exit 1; }
       exported="$(grep -oE "'?_[A-Za-z0-9_]+'?" "$tbd" | tr -d "'" | sed 's/^_//' | sort -u)"
       [ -z "$(comm -12 <(printf '%s\n' "$undefined") <(printf '%s\n' "$exported"))" ] || frameworks+=("$name")
-    done
+    done < <(grep -oE -- '-framework [A-Za-z]+' <<<"$extralibs" | awk '{print $2}' | sort -u)
     ;;
 esac
 if [ ${#frameworks[@]} -eq 0 ]; then frameworks_line=none; else frameworks_line="${frameworks[*]}"; fi
