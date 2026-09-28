@@ -84,6 +84,7 @@ fn main() {
     println!("cargo:rustc-link-lib=static=avcodec");
     println!("cargo:rustc-link-lib=static=avutil");
     link_system_libs(&target, text.as_deref(), &provenance);
+    link_frameworks(&target, text.as_deref(), &provenance);
 
     // For a consumer compiling its own C against the same headers, via the
     // `DEP_AVCODEC_INCLUDE` that `links = "avcodec"` exposes.
@@ -187,6 +188,35 @@ fn link_system_libs(target: &str, text: Option<&str>, provenance: &str) {
     };
     for lib in libs {
         println!("cargo:rustc-link-lib=dylib={lib}");
+    }
+}
+
+/// Emit a link flag for each Apple framework the archives need.
+///
+/// `build.sh` measures these as it does the system libraries — each framework FFmpeg's
+/// `EXTRALIBS` names, kept when the SDK's export list for it holds a symbol the archives leave
+/// undefined — and writes the answer as `frameworks`: VideoToolbox and what it needs on macOS,
+/// for the HEVC hwaccel, and `none` everywhere else.
+///
+/// A MANIFEST without the line is an archive built before the hwaccel, and one the identity check
+/// passes, since the FFmpeg commit is the same: it is refused rather than linked without it. An
+/// archive with no MANIFEST at all gets the frameworks the hwaccel needs on an Apple target.
+fn link_frameworks(target: &str, text: Option<&str>, provenance: &str) {
+    let frameworks: Vec<&str> = match (text, manifest_line(text, "frameworks")) {
+        (_, Some("none")) => Vec::new(),
+        (_, Some(list)) => list.split_whitespace().collect(),
+        (Some(_), None) => panic!(
+            "\n\nthe MANIFEST (from {provenance}) has no frameworks line: that archive was built \
+             before the VideoToolbox hwaccel. Run ./build.sh and ./sync-prebuilt.sh, or fetch the \
+             current release.\n"
+        ),
+        (None, None) if target.contains("apple") => {
+            vec!["CoreFoundation", "CoreMedia", "CoreVideo", "VideoToolbox"]
+        }
+        (None, None) => Vec::new(),
+    };
+    for framework in frameworks {
+        println!("cargo:rustc-link-lib=framework={framework}");
     }
 }
 

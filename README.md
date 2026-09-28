@@ -55,9 +55,21 @@ FFmpeg configured with `--disable-everything --disable-autodetect`, and then two
 back: **`--enable-decoder=hevc --enable-parser=hevc`**. That is Main, Main 10, Main 12 and the
 range extensions FFmpeg implements, with frame and slice (WPP) threading; and the parser, which
 turns an Annex B byte stream in arbitrary chunks into the packets `avcodec_send_packet` wants.
-Only libavcodec and libavutil are built. No other codec, no bitstream filter, no hwaccel, no
-demuxer, no zlib/iconv/VAAPI/VideoToolbox/CUDA — nothing autodetected, so nothing on the build
-machine can leak into the archive as a link-time dependency.
+Only libavcodec and libavutil are built. No other codec, no bitstream filter, no demuxer, no
+zlib/iconv/VAAPI/CUDA — nothing autodetected, so nothing on the build machine can leak into the
+archive as a link-time dependency.
+
+**One hwaccel, on macOS: VideoToolbox's HEVC one** (`--enable-videotoolbox
+--enable-hwaccel=hevc_videotoolbox`). A consumer that gives the context a VideoToolbox device
+(`av_hwdevice_ctx_create`, `hw_device_ctx`) and picks `AV_PIX_FMT_VIDEOTOOLBOX` in `get_format`
+gets VideoToolbox pictures, and `av_hwframe_transfer_data` copies them out as NV12, P010 or NV24.
+For HEVC, FFmpeg asks VideoToolbox to *enable* its hardware decoder, not to require it, so such a
+picture is not by itself proof the Mac's media engine decoded it. One that sets no device decodes
+on the CPU exactly as before. When the hwaccel fails to start, FFmpeg calls `get_format` again
+without `AV_PIX_FMT_VIDEOTOOLBOX`, and the CPU decodes only if the callback picks one of the software
+formats still offered; a picture VideoToolbox fails to decode once started is returned as an error,
+not decoded on the CPU instead. VideoToolbox is part of every macOS,
+so it adds Apple's own frameworks to the link and nothing else. No other target has a hwaccel.
 
 **No encoder.** FFmpeg has no HEVC encoder of its own: `hevc` encoding in FFmpeg means libx265
 (GPL, C++, its own cmake build), or a hardware encoder (NVENC, QSV, VideoToolbox, VAAPI, AMF,
@@ -68,17 +80,19 @@ archive into something else, and the end-to-end test does not need one — see
 `build.sh` then asserts what it configured, rather than trusting it:
 
 - the licence configure reports is **LGPL version 2.1 or later** — nothing GPL or non-free got in;
-- `config_components.h` enables exactly the HEVC decoder and parser, and no encoder, bsf or
-  hwaccel; and the archive's codec registry, read with `nm`, holds exactly `ff_hevc_decoder` and
-  `ff_hevc_parser`;
-- the 27 entry points the crates call are defined, each in the library it must be in;
+- `config_components.h` enables exactly the HEVC decoder and parser, no encoder or bsf, and no
+  hwaccel but `hevc_videotoolbox` on macOS, with `CONFIG_VIDEOTOOLBOX` on; and the archive's codec
+  registry, read with `nm`, holds exactly `ff_hevc_decoder` and `ff_hevc_parser`;
+- the 32 entry points the crates call are defined, each in the library it must be in;
 - `CONFIG_RUNTIME_CPUDETECT` is on, and the SIMD configuration it needs is too;
 - the SIMD kernels are in the archive, counted ([below](#simd-and-no-cpu-floor));
-- the system libraries the archives need are **measured** from their undefined symbols, and
-  `build.rs` emits link flags from the measurement; and no symbol reaches for a C++ runtime;
+- the system libraries and Apple frameworks the archives need are **measured** from their
+  undefined symbols, and `build.rs` emits link flags from the measurement; and no symbol reaches
+  for a C++ runtime;
 - on Windows, every member is a real COFF object (no `/GL` blobs), the objects name the dynamic
   CRT and not the static one, and none names an unshipped PDB;
-- on macOS the deployment target is read back off every member (`minos 11.0`).
+- on macOS the deployment target is read back off every member (`minos 14.0`), and no member
+  calls compiler-rt's `__isPlatformVersionAtLeast`, which a Rust link does not reliably carry.
 
 `av_version_info()` returns `9.0.2`: build.sh passes the release number as `REVISION`, where
 FFmpeg's build would otherwise ask `git describe` in a one-commit-deep checkout and get a hash.
@@ -109,6 +123,13 @@ FFmpeg is C, so unlike libde265-prebuilt there is **no C++ runtime** to carry. W
 need is measured into the MANIFEST as `system_libs` and emitted by `build.rs`: `m pthread` on
 Linux, nothing on macOS (libSystem), and on Windows what FFmpeg's own configure tested and
 recorded — `ole32 user32 bcrypt`, all of them part of every Windows install.
+
+The Apple frameworks are measured into a second line, `frameworks`: each framework FFmpeg's
+`EXTRALIBS` names is kept when the SDK's `.tbd` export list for it holds a symbol the archives
+leave undefined. On macOS that is `CoreFoundation CoreMedia CoreVideo VideoToolbox`, for the
+hwaccel (CoreServices, which FFmpeg also names, is referenced by nothing and dropped); elsewhere
+`none`. `build.rs` refuses a MANIFEST without the line: it is an archive built before the hwaccel,
+of the same FFmpeg commit, which the identity check would otherwise pass.
 
 **No musl mapping.** The Linux archives are compiled against glibc and reference glibc-only
 names — `__isoc99_sscanf`, `__xpg_strerror_r`, the LFS64 aliases (`open64`, `fstat64`) that musl
@@ -173,6 +194,13 @@ requires every frame to match, with the stream's in-band MD5 picture hashes veri
 (`AV_EF_CRCCHECK | AV_EF_EXPLODE`). It proves that check is live (skipping the loop filters must
 fail it), and that a stream cut at 60% drains to EOF with at most one error and outputs reference
 pictures in display order — every one but the picture the cut landed in, which FFmpeg conceals.
+
+On macOS it decodes both streams once more through the VideoToolbox hwaccel, and requires every
+picture to be a VideoToolbox one — so FFmpeg's own decoder cannot pass for it — and, copied out and
+unpacked from NV12 or P010, to match the same reference to the bit. That proves the hwaccel path,
+not the hardware: VideoToolbox is free to decode HEVC in software, and the test does not ask. A virtual
+Mac (`kern.hv_vmm_present`) may have no hardware decoder to reach, and there an unavailable one is
+reported and not failed; on any other Mac it fails.
 
 ## Local loop
 

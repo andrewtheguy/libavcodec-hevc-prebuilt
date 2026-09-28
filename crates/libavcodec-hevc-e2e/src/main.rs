@@ -32,7 +32,11 @@
 //!   6. with the loop filters skipped, the in-band MD5 check **fails** — proving it was live;
 //!   7. a stream cut off at 60% drains to EOF with at most one error, and outputs reference
 //!      pictures in display order — all but the one picture the cut landed in, which FFmpeg
-//!      conceals and outputs, and which nothing sent before the cut can reference.
+//!      conceals and outputs, and which nothing sent before the cut can reference;
+//!   8. on macOS, every frame of both streams decodes to exactly the reference through the
+//!      VideoToolbox hwaccel too — each one a VideoToolbox picture, so FFmpeg's own decoder
+//!      cannot pass for it (though VideoToolbox itself may decode in software). A virtual Mac may have no hardware decoder to reach, so
+//!      there an unavailable one is reported and not failed; anywhere else it fails.
 //!
 //! Nothing here is a benchmark, and no timing is asserted — a CI runner's clock is not a fact
 //! about the decoder. The `-md5` rows are printed, with the SIMD speed-up they imply, because
@@ -101,6 +105,8 @@ struct Setup {
     md5: bool,
     /// The fraction of the stream fed in before the flush; 1.0 is all of it.
     keep: f64,
+    /// Give the context a VideoToolbox device and ask for its pictures (8).
+    videotoolbox: bool,
 }
 
 const SIMD: Setup = Setup {
@@ -112,6 +118,7 @@ const SIMD: Setup = Setup {
     loop_filter: true,
     md5: true,
     keep: 1.0,
+    videotoolbox: false,
 };
 const SCALAR: Setup = Setup { label: "scalar", simd: false, ..SIMD };
 const FRAME_THREADS: Setup = Setup {
@@ -132,6 +139,9 @@ const SIMD_NO_MD5: Setup = Setup { label: "simd -md5", md5: false, ..SIMD };
 const SCALAR_NO_MD5: Setup = Setup { label: "scalar -md5", md5: false, ..SCALAR };
 const NO_LOOP_FILTER: Setup = Setup { label: "no lf", loop_filter: false, ..SIMD };
 const TRUNCATED: Setup = Setup { label: "cut at 60%", keep: 0.6, ..SIMD };
+/// The MD5 check off: FFmpeg verifies the SEI against pictures it decoded itself, and a
+/// VideoToolbox picture is not one.
+const VIDEOTOOLBOX: Setup = Setup { label: "videotoolbox", md5: false, videotoolbox: true, ..SIMD };
 
 fn main() {
     sha256::self_test();
@@ -266,11 +276,18 @@ fn main() {
             stream.name
         );
         rows.push(row(stream, TRUNCATED, &run, reference.len()));
+
+        // (8)
+        if cfg!(target_os = "macos") {
+            if let Some(run) = check_videotoolbox(stream, &reference) {
+                rows.push(row(stream, VIDEOTOOLBOX, &run, reference.len()));
+            }
+        }
     }
 
     println!();
-    println!("| stream | decode      | frames | exact | errors | µs/frame |");
-    println!("|--------|-------------|--------|-------|--------|----------|");
+    println!("| stream | decode       | frames | exact | errors | µs/frame |");
+    println!("|--------|--------------|--------|-------|--------|----------|");
     for r in &rows {
         println!("{r}");
     }
@@ -403,6 +420,81 @@ fn check_error_constants() {
     }
 }
 
+/// (8) Decode `stream` through the VideoToolbox hwaccel and hold it to the reference; `None` when
+/// this is a virtual Mac with no hardware decoder to reach.
+fn check_videotoolbox(stream: &Stream, reference: &[&str]) -> Option<Run> {
+    let run = decode(stream, VIDEOTOOLBOX);
+    if run.hardware == 0 {
+        let why = run.device_error.map_or_else(
+            || "FFmpeg decoded every picture itself".to_string(),
+            |code| format!("no VideoToolbox device: {}", err_text(code)),
+        );
+        assert!(
+            virtual_mac(),
+            "{}: the VideoToolbox hwaccel decoded nothing ({why}) on a Mac that is not virtual",
+            stream.name
+        );
+        println!(
+            "{}: VideoToolbox unavailable on this virtual Mac ({why}) — not checked",
+            stream.name
+        );
+        return None;
+    }
+    assert!(
+        run.errors.is_empty(),
+        "{} (videotoolbox): libavcodec returned {}",
+        stream.name,
+        describe(&run.errors)
+    );
+    assert_eq!(
+        run.hardware,
+        run.frames.len(),
+        "{}: {} of {} pictures came from VideoToolbox, the rest from FFmpeg's own decoder",
+        stream.name,
+        run.hardware,
+        run.frames.len()
+    );
+    assert_eq!(
+        run.frames.len(),
+        reference.len(),
+        "{} (videotoolbox): decoded {} frames, the reference has {}",
+        stream.name,
+        run.frames.len(),
+        reference.len()
+    );
+    if let Some(i) = first_mismatch(&run.frames, reference) {
+        panic!(
+            "{} (videotoolbox): frame {i} is not the reference picture — {} against {}",
+            stream.name, run.frames[i], reference[i]
+        );
+    }
+    Some(run)
+}
+
+/// Whether this Mac is a virtual machine, from the kernel's own `kern.hv_vmm_present`.
+fn virtual_mac() -> bool {
+    let out = std::process::Command::new("sysctl").args(["-n", "kern.hv_vmm_present"]).output();
+    let out = out.expect("running sysctl -n kern.hv_vmm_present");
+    assert!(out.status.success(), "sysctl -n kern.hv_vmm_present failed");
+    String::from_utf8_lossy(&out.stdout).trim() == "1"
+}
+
+/// Choose VideoToolbox's pictures when the decoder offers them, and its default otherwise — which
+/// is also what FFmpeg asks again for when the hwaccel fails to start.
+unsafe extern "C" fn prefer_videotoolbox(
+    ctx: *mut AVCodecContext,
+    formats: *const AVPixelFormat,
+) -> AVPixelFormat {
+    let mut at = formats;
+    while *at != AVPixelFormat_AV_PIX_FMT_NONE {
+        if *at == AVPixelFormat_AV_PIX_FMT_VIDEOTOOLBOX {
+            return *at;
+        }
+        at = at.add(1);
+    }
+    avcodec_default_get_format(ctx, formats)
+}
+
 /// What one decode produced.
 struct Run {
     /// The SHA-256 of each output picture, planes packed without stride padding.
@@ -414,13 +506,17 @@ struct Run {
     /// the hash is this binary's cost, not FFmpeg's, and would otherwise flatten the SIMD column.
     micros: u128,
     hash_micros: u128,
+    /// How many of `frames` were VideoToolbox pictures.
+    hardware: usize,
+    /// What `av_hwdevice_ctx_create` returned, when it refused.
+    device_error: Option<c_int>,
 }
 
 fn row(stream: &Stream, setup: Setup, run: &Run, expected: usize) -> String {
     let reference: Vec<&str> = stream.reference.lines().collect();
     let (exact, _) = in_order(&run.frames, &reference);
     format!(
-        "| {:6} | {:11} | {:3}/{:<2} | {:5} | {:6} | {:8} |",
+        "| {:6} | {:12} | {:3}/{:<2} | {:5} | {:6} | {:8} |",
         stream.name,
         setup.label,
         run.frames.len(),
@@ -450,8 +546,15 @@ fn first_mismatch(frames: &[String], reference: &[&str]) -> Option<usize> {
 
 /// Decode `stream` under `setup`: bytes through the parser, packets to the decoder, frames out.
 fn decode(stream: &Stream, setup: Setup) -> Run {
-    let mut run =
-        Run { frames: Vec::new(), errors: Vec::new(), eof: false, micros: 0, hash_micros: 0 };
+    let mut run = Run {
+        frames: Vec::new(),
+        errors: Vec::new(),
+        eof: false,
+        micros: 0,
+        hash_micros: 0,
+        hardware: 0,
+        device_error: None,
+    };
     let input = &stream.bytes[..(stream.bytes.len() as f64 * setup.keep) as usize];
 
     // av_parser_parse2 reads up to AV_INPUT_BUFFER_PADDING_SIZE bytes past the `len` it is
@@ -479,6 +582,24 @@ fn decode(stream: &Stream, setup: Setup) -> Run {
         }
         if !setup.loop_filter {
             (*ctx).skip_loop_filter = AVDiscard_AVDISCARD_ALL;
+        }
+        if setup.videotoolbox {
+            let mut device = ptr::null_mut();
+            let ret = av_hwdevice_ctx_create(
+                &mut device,
+                AVHWDeviceType_AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                ptr::null(),
+                ptr::null_mut(),
+                0,
+            );
+            if ret < 0 {
+                run.device_error = Some(ret);
+            } else {
+                // The context takes its own reference; this one is dropped once it has.
+                (*ctx).hw_device_ctx = av_buffer_ref(device);
+                (*ctx).get_format = Some(prefer_videotoolbox);
+                av_buffer_unref(&mut device);
+            }
         }
         check(avcodec_open2(ctx, codec, ptr::null_mut()), "avcodec_open2");
 
@@ -605,7 +726,18 @@ unsafe fn receive(ctx: *mut AVCodecContext, frame: *mut AVFrame, stream: &Stream
             continue;
         }
         let hashing = Instant::now();
-        run.frames.push(frame_hash(&*frame, stream));
+        if (*frame).format == AVPixelFormat_AV_PIX_FMT_VIDEOTOOLBOX as c_int {
+            // The picture is VideoToolbox's; its samples are copied out to be hashed, into the
+            // planar-interleaved format VideoToolbox decoded to (NV12, or P010 for 10-bit).
+            let mut copy = av_frame_alloc();
+            assert!(!copy.is_null(), "av_frame_alloc returned null");
+            check(av_hwframe_transfer_data(copy, frame, 0), "av_hwframe_transfer_data");
+            run.frames.push(frame_hash(&*copy, stream));
+            run.hardware += 1;
+            av_frame_free(&mut copy);
+        } else {
+            run.frames.push(frame_hash(&*frame, stream));
+        }
         run.hash_micros += hashing.elapsed().as_micros();
         av_frame_unref(frame);
     }
@@ -616,10 +748,21 @@ unsafe fn receive(ctx: *mut AVCodecContext, frame: *mut AVFrame, stream: &Stream
 /// Checks the picture's shape on the way, since a wrong size would otherwise surface only as a
 /// hash mismatch.
 ///
+/// A VideoToolbox picture, copied out, is the same samples semi-planar: NV12's Cb and Cr
+/// interleaved in one plane, and P010's, besides, with each 10-bit sample in the top bits of its
+/// 16. Both are unpacked into the planar layout the reference hashed.
+///
 /// # Safety
 ///
-/// `frame` must be a frame `avcodec_receive_frame` just filled.
+/// `frame` must be a frame `avcodec_receive_frame` just filled, or a copy of one.
 unsafe fn frame_hash(frame: &AVFrame, stream: &Stream) -> String {
+    let semi_planar = match stream.bit_depth {
+        8 => AVPixelFormat_AV_PIX_FMT_NV12,
+        _ => AVPixelFormat_AV_PIX_FMT_P010LE,
+    };
+    if frame.format == semi_planar as c_int {
+        return semi_planar_hash(frame, stream);
+    }
     assert_eq!(
         frame.format,
         stream.pix_fmt as c_int,
@@ -652,6 +795,54 @@ unsafe fn frame_hash(frame: &AVFrame, stream: &Stream) -> String {
                 data.add(row * stride as usize),
                 row_bytes,
             ));
+        }
+    }
+    sha256::hex(&packed)
+}
+
+/// [`frame_hash`] for a semi-planar copy of a VideoToolbox picture.
+///
+/// # Safety
+///
+/// As for [`frame_hash`].
+unsafe fn semi_planar_hash(frame: &AVFrame, stream: &Stream) -> String {
+    assert_eq!(
+        (frame.width as usize, frame.height as usize),
+        (W, H),
+        "{}: wrong picture size",
+        stream.name
+    );
+    let bytes_per_sample = if stream.bit_depth > 8 { 2 } else { 1 };
+    let row = |plane: usize, y: usize, bytes: usize| {
+        let stride = frame.linesize[plane] as usize;
+        assert!(stride >= bytes, "{}: plane {plane} stride {stride} < {bytes}", stream.name);
+        std::slice::from_raw_parts(frame.data[plane].add(y * stride), bytes)
+    };
+    // One sample of `bytes_per_sample`, as the reference stores it: P010's 10 bits moved down.
+    let push = |packed: &mut Vec<u8>, sample: &[u8]| {
+        if bytes_per_sample == 1 {
+            packed.push(sample[0]);
+        } else {
+            let value = u16::from_le_bytes([sample[0], sample[1]]) >> 6;
+            packed.extend_from_slice(&value.to_le_bytes());
+        }
+    };
+    let mut packed = Vec::with_capacity(W * H * 3 * bytes_per_sample / 2);
+    for y in 0..H {
+        for sample in row(0, y, W * bytes_per_sample).chunks(bytes_per_sample) {
+            push(&mut packed, sample);
+        }
+    }
+    // Cb is every first sample of the interleaved plane, Cr every second.
+    for chroma in 0..2 {
+        for y in 0..H / 2 {
+            let pairs = row(1, y, W * bytes_per_sample);
+            for pair in pairs.chunks(2 * bytes_per_sample) {
+                push(
+                    &mut packed,
+                    &pair[chroma * bytes_per_sample..(chroma + 1) * bytes_per_sample],
+                );
+            }
         }
     }
     sha256::hex(&packed)
