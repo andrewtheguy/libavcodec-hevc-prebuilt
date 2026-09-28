@@ -39,8 +39,11 @@ through `gh`, so they need a login with access to the archive repository.
 ## What not to "fix"
 
 - **`--disable-everything --disable-autodetect`, then only `--enable-decoder=hevc
-  --enable-parser=hevc`.** Anything autodetected is a system library at every consumer's link.
-  `--disable-iconv` is spelled out because glibc makes the iconv probe succeed anyway.
+  --enable-parser=hevc`**, plus `--enable-videotoolbox --enable-hwaccel=hevc_videotoolbox` on
+  macOS alone. Anything autodetected is a system library at every consumer's link; VideoToolbox
+  is asked for by name, and what it links is Apple's frameworks, measured into the MANIFEST's
+  `frameworks` line. `--disable-iconv` is spelled out because glibc makes the iconv probe succeed
+  anyway.
 - **No encoder.** FFmpeg has none of its own for HEVC; libx265 is GPL + C++ and would change the
   licence and the link of every consumer. The e2e test does not need one.
 - **`REVISION=$FFMPEG_VERSION` on make's command line** is what makes `av_version_info()` say

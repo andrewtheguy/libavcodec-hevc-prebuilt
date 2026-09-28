@@ -6,7 +6,7 @@
 #   ./build.sh <target>
 #
 # Targets:
-#   macos-arm64          libavcodec.a libavutil.a  (Apple silicon, deployment target 11.0; NEON, i8mm at run time)
+#   macos-arm64          libavcodec.a libavutil.a  (Apple silicon, deployment target 14.0; NEON, i8mm at run time)
 #   linux-x86_64         libavcodec.a libavutil.a  (x86-64 baseline; SSE2..AVX2 dispatched at run time)
 #   linux-aarch64        libavcodec.a libavutil.a  (ARMv8-A baseline; NEON, i8mm at run time)
 #   windows-x86_64-msvc  avcodec.lib avutil.lib    (x86-64 baseline, same kernels as Linux; dynamic CRT)
@@ -84,9 +84,21 @@ case "$target" in
     # MACOSX_DEPLOYMENT_TARGET for *every* invocation, including the ones FFmpeg's Makefile makes
     # to assemble the NEON `.S` files, which do not all see the extra C flags. Read back off every
     # member below rather than trusted.
-    deployment_target=11.0
+    #
+    # 14.0, the oldest macOS supported. It also settles the hwaccel's `__builtin_available(macOS
+    # 12.0, …)` checks at compile time; below 12.0 clang compiles each into a call to
+    # `__isPlatformVersionAtLeast`, compiler-rt's runtime half of `@available`. A Rust link has no
+    # compiler-rt: std defines the symbol weakly, says not to rely on it, and a thin-LTO link drops
+    # it before the linker meets the archive's reference — measured, an undefined-symbol failure in
+    # a consumer's release build. So no availability check is left to run; asserted below.
+    deployment_target=14.0
     export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
-    configure_args+=(--enable-pthreads)
+    # VideoToolbox's HEVC hwaccel, the one hwaccel in any archive: the decoder above hands its
+    # pictures to the Mac's media engine when a consumer gives the context a VideoToolbox device,
+    # and decodes on the CPU when it does not. VideoToolbox and the frameworks it needs are part
+    # of every macOS, so what it adds to a consumer's link is Apple's own frameworks — measured
+    # below, like the system libraries — and never a library the build machine happened to have.
+    configure_args+=(--enable-pthreads --enable-videotoolbox --enable-hwaccel=hevc_videotoolbox)
     floor='armv8-a (NEON is baseline; i8mm kernels dispatched at run time)'
     ;;
   linux-x86_64)
@@ -224,14 +236,19 @@ license="$(sed -n 's/^#define FFMPEG_LICENSE "\(.*\)"$/\1/p' "$config_h")"
 }
 echo "   licence: $license"
 
-# Then what `--disable-everything` left: exactly one decoder, one parser, and no encoder, bsf or
-# hwaccel. Read from config_components.h — FFmpeg's own statement of what it compiled — and then again from
-# the archive below.
+# Then what `--disable-everything` left: exactly one decoder, one parser, no encoder or bsf, and
+# no hwaccel but VideoToolbox's HEVC one on macOS. Read from config_components.h — FFmpeg's own
+# statement of what it compiled — and then again from the archive below.
+case "$target" in
+  macos-*) want_hwaccel=HEVC_VIDEOTOOLBOX ;;
+  *) want_hwaccel='' ;;
+esac
 enabled() { { grep -E "^#define CONFIG_[A-Z0-9_]+_$1 1$" "$components_h" || true; } | sed -E "s/^#define CONFIG_([A-Z0-9_]+)_$1 1$/\1/" | tr '\n' ' ' | sed 's/ $//'; }
 for kind in DECODER PARSER ENCODER BSF HWACCEL; do
   got="$(enabled "$kind")"
   case "$kind" in
     DECODER | PARSER) want=HEVC ;;
+    HWACCEL) want="$want_hwaccel" ;;
     *) want='' ;;
   esac
   [ "$got" = "$want" ] || {
@@ -239,7 +256,13 @@ for kind in DECODER PARSER ENCODER BSF HWACCEL; do
     exit 1
   }
 done
-echo "   decoder: hevc   parser: hevc   encoders, bsfs, hwaccels: none"
+# configure drops a component whose dependencies it cannot find with no more than a line in its
+# log, so the hwaccel's library switch is asserted too: without it the component above is dead.
+if [ -n "$want_hwaccel" ] && ! grep -qE '^#define CONFIG_VIDEOTOOLBOX 1$' "$config_h"; then
+  echo "CONFIG_VIDEOTOOLBOX is off — configure dropped VideoToolbox" >&2
+  exit 1
+fi
+echo "   decoder: hevc   parser: hevc   encoders, bsfs: none   hwaccels: ${want_hwaccel:-none}"
 
 # The SIMD configuration FFmpeg settled on. configure turns an instruction set *off* with no
 # more than a line in its output when a probe fails — an old nasm without AVX-512 support, an
@@ -288,9 +311,12 @@ esac
 # `type name` pairs, member headers dropped. No `2>/dev/null || true`: an nm that cannot read an
 # archive would produce an empty list, and every check below would then report a *missing*
 # symbol — a measurement failure wearing the costume of a build failure.
+#
+# Apple's nm prints an undefined symbol as its bare name, with no `U` column, which is read as one:
+# dropping one-field lines instead left the macOS list empty, and every measurement of it vacuous.
 list_symbols() {
   # $1: --defined-only or --undefined-only; $2: the archive
-  "$nm_tool" "$1" "$(np "$2")" | awk 'NF >= 2 && !/:$/ { print $(NF-1), $NF }'
+  "$nm_tool" "$1" "$(np "$2")" | awk '!/:$/ && NF >= 2 { print $(NF-1), $NF } !/:$/ && NF == 1 { print "U", $1 }'
 }
 avcodec_defined="$(list_symbols --defined-only "${libs[0]}")" || { echo "$nm_tool could not read ${libs[0]}" >&2; exit 1; }
 avutil_defined="$(list_symbols --defined-only "${libs[1]}")" || { echo "$nm_tool could not read ${libs[1]}" >&2; exit 1; }
@@ -316,10 +342,11 @@ check_defined "$avcodec_defined" libavcodec \
   avcodec_find_decoder avcodec_alloc_context3 avcodec_open2 avcodec_send_packet \
   avcodec_receive_frame avcodec_flush_buffers avcodec_free_context avcodec_version \
   avcodec_configuration avcodec_license av_codec_iterate av_parser_iterate av_parser_init \
-  av_parser_parse2 av_parser_close av_packet_alloc av_packet_free
+  av_parser_parse2 av_parser_close av_packet_alloc av_packet_free avcodec_default_get_format
 check_defined "$avutil_defined" libavutil \
   av_frame_alloc av_frame_free av_frame_unref av_version_info avutil_version av_strerror \
-  av_log_set_level av_get_cpu_flags av_force_cpu_flags av_get_pix_fmt_name
+  av_log_set_level av_get_cpu_flags av_force_cpu_flags av_get_pix_fmt_name \
+  av_hwdevice_ctx_create av_hwframe_transfer_data av_buffer_ref av_buffer_unref
 
 # The codec registry, read off the archive: FFCodec and FFCodecParser objects are *data*
 # symbols named `ff_<name>_decoder` / `_encoder` / `_parser`, which is how `av_codec_iterate`
@@ -373,9 +400,8 @@ measure() {
 }
 # FFmpeg's own statement, recorded verbatim per library beside the measurement for whoever
 # compares them. It is a superset: configure adds `-latomic` whenever it merely links, and on
-# macOS lists CoreFoundation, CoreMedia and CoreVideo for libavutil although nothing that uses
-# them is compiled in — measured: the archives reference no symbol of any of the three, and the
-# e2e binary links and runs without them.
+# macOS lists CoreServices, which the VideoToolbox hwaccel suggests and nothing compiled in
+# references — measured below, and dropped.
 extralibs="$(grep -E '^EXTRALIBS-(avcodec|avutil)=' "$config_mak" | sed 's/^EXTRALIBS-//' | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
 system_libs=()
 case "$target" in
@@ -408,11 +434,35 @@ case "$target" in
 esac
 if [ ${#system_libs[@]} -eq 0 ]; then system_libs_line=none; else system_libs_line="${system_libs[*]}"; fi
 echo "   system_libs: $system_libs_line   (FFmpeg's EXTRALIBS: ${extralibs:-none})"
+
+# The Apple frameworks, measured the same way: each framework FFmpeg's EXTRALIBS names is kept
+# when the SDK's own export list for it — its `.tbd` — holds a symbol the archives leave
+# undefined, and dropped otherwise, as CoreFoundation, CoreMedia and CoreVideo were before the
+# hwaccel (see above). build.rs links each one the MANIFEST lists as a framework.
+frameworks=()
+case "$target" in
+  macos-*)
+    sdk="$(xcrun --show-sdk-path)"
+    for name in $(grep -oE -- '-framework [A-Za-z]+' <<<"$extralibs" | awk '{print $2}' | sort -u); do
+      tbd="$sdk/System/Library/Frameworks/$name.framework/$name.tbd"
+      [ -f "$tbd" ] || { echo "the SDK has no $tbd for FFmpeg's -framework $name" >&2; exit 1; }
+      exported="$(grep -oE "'?_[A-Za-z0-9_]+'?" "$tbd" | tr -d "'" | sed 's/^_//' | sort -u)"
+      [ -z "$(comm -12 <(printf '%s\n' "$undefined") <(printf '%s\n' "$exported"))" ] || frameworks+=("$name")
+    done
+    ;;
+esac
+if [ ${#frameworks[@]} -eq 0 ]; then frameworks_line=none; else frameworks_line="${frameworks[*]}"; fi
+echo "   frameworks: $frameworks_line"
 # No C++ anywhere: FFmpeg is C. Asserted, because the day a C++ object appears the consumers
 # need a runtime they are not linking.
 cxx="$(measure '^(_Zn[wa]|_Zd[la]|_ZN?St|__cxa_|__gxx_personality|\?\?[23]@YA|.*@std@@)')"
 [ -z "$cxx" ] || { echo "the archives reference the C++ runtime: $cxx" >&2; exit 1; }
 echo "   no C++ runtime"
+# Nor compiler-rt's availability checks, which no Rust link reliably carries (see the deployment
+# target above): a newer check in a future FFmpeg fails here rather than in a consumer's LTO link.
+availability="$(measure '^_*is(Platform|OS)VersionAtLeast$')"
+[ -z "$availability" ] || { echo "the archives call compiler-rt's availability check: $availability" >&2; exit 1; }
+echo "   no runtime availability checks"
 
 crt='n/a'
 if [ "$msvc" = 1 ]; then
@@ -473,6 +523,7 @@ echo "   $avutil_sha  $(basename "${libs[1]}")"
   echo "libraries lib/$(basename "${libs[0]}") lib/$(basename "${libs[1]}")"
   echo "cpu_floor $floor"
   echo "system_libs $system_libs_line"
+  echo "frameworks $frameworks_line"
   echo "extralibs(ffmpeg) ${extralibs:-none}"
   echo "crt $crt"
   echo "simd_config $simd_config"

@@ -22,7 +22,8 @@ sha256_of() {
 # parser is what turns an Annex B byte stream (or any arbitrary chunking of one) into the
 # packets `avcodec_send_packet` wants; without it a consumer reading a raw `.hevc` file would
 # have to find access-unit boundaries itself. No bitstream filters, no encoders (FFmpeg has no
-# HEVC encoder of its own — see the README), no hwaccels.
+# HEVC encoder of its own — see the README), and no hwaccels here: build.sh adds VideoToolbox's
+# HEVC one for macOS alone.
 #
 # `--disable-autodetect`, because every autodetected dependency is a system library the archive
 # would then need at every consumer's link: zlib, iconv, VideoToolbox, VAAPI, CUDA, Vulkan,
