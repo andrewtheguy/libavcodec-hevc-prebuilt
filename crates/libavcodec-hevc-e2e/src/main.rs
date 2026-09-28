@@ -35,8 +35,10 @@
 //!      conceals and outputs, and which nothing sent before the cut can reference;
 //!   8. on macOS, every frame of both streams decodes to exactly the reference through the
 //!      VideoToolbox hwaccel too — each one a VideoToolbox picture, so FFmpeg's own decoder
-//!      cannot pass for it (though VideoToolbox itself may decode in software). A virtual Mac may have no hardware decoder to reach, so
-//!      there an unavailable one is reported and not failed; anywhere else it fails.
+//!      cannot pass for it (though VideoToolbox itself may decode in software). On a virtual
+//!      Mac, VideoToolbox's result is reported and not checked: it may have no decoder to reach,
+//!      and macOS 26's guest decodes the 8-bit stream unlike the reference while the 10-bit one
+//!      matches. On any other Mac a shortfall fails.
 //!
 //! Nothing here is a benchmark, and no timing is asserted — a CI runner's clock is not a fact
 //! about the decoder. The `-md5` rows are printed, with the SIMD speed-up they imply, because
@@ -421,25 +423,47 @@ fn check_error_constants() {
 }
 
 /// (8) Decode `stream` through the VideoToolbox hwaccel and hold it to the reference; `None` when
-/// this is a virtual Mac with no hardware decoder to reach.
+/// VideoToolbox decoded nothing on a virtual Mac.
+///
+/// A virtual Mac's result is reported and not checked. Its VideoToolbox may have no decoder to
+/// reach, and where it has one it is not the Mac's: on a macOS 26 guest of an M2 Max, which logs
+/// that it has no scaler (`AppleM2ScalerParavirtDriver`), the 10-bit stream matched the reference
+/// and not one picture of the 8-bit stream did, while the host decoded both exactly.
 fn check_videotoolbox(stream: &Stream, reference: &[&str]) -> Option<Run> {
     let run = decode(stream, VIDEOTOOLBOX);
-    if run.hardware == 0 {
-        let why = run.device_error.map_or_else(
+    let why = || {
+        run.device_error.map_or_else(
             || "FFmpeg decoded every picture itself".to_string(),
             |code| format!("no VideoToolbox device: {}", err_text(code)),
-        );
-        assert!(
-            virtual_mac(),
-            "{}: the VideoToolbox hwaccel decoded nothing ({why}) on a Mac that is not virtual",
-            stream.name
-        );
+        )
+    };
+    if virtual_mac() {
+        if run.hardware == 0 {
+            println!(
+                "{}: VideoToolbox unavailable on this virtual Mac ({}) — not checked",
+                stream.name,
+                why()
+            );
+            return None;
+        }
+        let exact = run.frames.iter().zip(reference).filter(|(a, b)| a == b).count();
         println!(
-            "{}: VideoToolbox unavailable on this virtual Mac ({why}) — not checked",
-            stream.name
+            "{}: on this virtual Mac VideoToolbox gave {} of {} pictures, {exact} of {} as the \
+             reference, with {} errors — not checked",
+            stream.name,
+            run.hardware,
+            run.frames.len(),
+            reference.len(),
+            run.errors.len()
         );
-        return None;
+        return Some(run);
     }
+    assert!(
+        run.hardware > 0,
+        "{}: the VideoToolbox hwaccel decoded nothing ({}) on a Mac that is not virtual",
+        stream.name,
+        why()
+    );
     assert!(
         run.errors.is_empty(),
         "{} (videotoolbox): libavcodec returned {}",
