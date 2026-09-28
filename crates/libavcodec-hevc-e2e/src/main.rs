@@ -434,10 +434,18 @@ fn check_videotoolbox(stream: &Stream, reference: &[&str]) -> Option<Run> {
             "{}: the VideoToolbox hwaccel decoded nothing ({why}) on a Mac that is not virtual",
             stream.name
         );
-        println!("{}: VideoToolbox unavailable on this virtual Mac ({why}) — not checked", stream.name);
+        println!(
+            "{}: VideoToolbox unavailable on this virtual Mac ({why}) — not checked",
+            stream.name
+        );
         return None;
     }
-    assert!(run.errors.is_empty(), "{} (videotoolbox): libavcodec returned {}", stream.name, describe(&run.errors));
+    assert!(
+        run.errors.is_empty(),
+        "{} (videotoolbox): libavcodec returned {}",
+        stream.name,
+        describe(&run.errors)
+    );
     assert_eq!(
         run.hardware,
         run.frames.len(),
@@ -830,7 +838,10 @@ unsafe fn semi_planar_hash(frame: &AVFrame, stream: &Stream) -> String {
         for y in 0..H / 2 {
             let pairs = row(1, y, W * bytes_per_sample);
             for pair in pairs.chunks(2 * bytes_per_sample) {
-                push(&mut packed, &pair[chroma * bytes_per_sample..(chroma + 1) * bytes_per_sample]);
+                push(
+                    &mut packed,
+                    &pair[chroma * bytes_per_sample..(chroma + 1) * bytes_per_sample],
+                );
             }
         }
     }
