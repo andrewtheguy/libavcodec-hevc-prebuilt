@@ -62,9 +62,13 @@ archive as a link-time dependency.
 **One hwaccel, on macOS: VideoToolbox's HEVC one** (`--enable-videotoolbox
 --enable-hwaccel=hevc_videotoolbox`). A consumer that gives the context a VideoToolbox device
 (`av_hwdevice_ctx_create`, `hw_device_ctx`) and picks `AV_PIX_FMT_VIDEOTOOLBOX` in `get_format`
-gets its pictures from the Mac's media engine, and `av_hwframe_transfer_data` copies them out as
-NV12, P010 or NV24; one that does not decodes on the CPU exactly as before, and FFmpeg falls back
-to that by itself for a stream VideoToolbox will not take. VideoToolbox is part of every macOS,
+gets VideoToolbox pictures, and `av_hwframe_transfer_data` copies them out as NV12, P010 or NV24.
+For HEVC, FFmpeg asks VideoToolbox to *enable* its hardware decoder, not to require it, so such a
+picture is not by itself proof the Mac's media engine decoded it. One that sets no device decodes
+on the CPU exactly as before. When the hwaccel fails to start, FFmpeg calls `get_format` again
+without `AV_PIX_FMT_VIDEOTOOLBOX`, and the CPU decodes only if the callback picks one of the software
+formats still offered; a picture VideoToolbox fails to decode once started is returned as an error,
+not decoded on the CPU instead. VideoToolbox is part of every macOS,
 so it adds Apple's own frameworks to the link and nothing else. No other target has a hwaccel.
 
 **No encoder.** FFmpeg has no HEVC encoder of its own: `hevc` encoding in FFmpeg means libx265
@@ -192,8 +196,9 @@ fail it), and that a stream cut at 60% drains to EOF with at most one error and 
 pictures in display order — every one but the picture the cut landed in, which FFmpeg conceals.
 
 On macOS it decodes both streams once more through the VideoToolbox hwaccel, and requires every
-picture to be a VideoToolbox one — so FFmpeg's fallback to its own decoder cannot pass for it —
-and, copied out and unpacked from NV12 or P010, to match the same reference to the bit. A virtual
+picture to be a VideoToolbox one — so FFmpeg's own decoder cannot pass for it — and, copied out and
+unpacked from NV12 or P010, to match the same reference to the bit. That proves the hwaccel path,
+not the hardware: VideoToolbox is free to decode HEVC in software, and the test does not ask. A virtual
 Mac (`kern.hv_vmm_present`) may have no hardware decoder to reach, and there an unavailable one is
 reported and not failed; on any other Mac it fails.
 

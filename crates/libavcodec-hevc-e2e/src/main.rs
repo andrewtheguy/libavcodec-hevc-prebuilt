@@ -34,8 +34,8 @@
 //!      pictures in display order — all but the one picture the cut landed in, which FFmpeg
 //!      conceals and outputs, and which nothing sent before the cut can reference;
 //!   8. on macOS, every frame of both streams decodes to exactly the reference through the
-//!      VideoToolbox hwaccel too — each one a VideoToolbox picture, so FFmpeg's fallback to its
-//!      own decoder cannot pass for it. A virtual Mac may have no hardware decoder to reach, so
+//!      VideoToolbox hwaccel too — each one a VideoToolbox picture, so FFmpeg's own decoder
+//!      cannot pass for it (though VideoToolbox itself may decode in software). A virtual Mac may have no hardware decoder to reach, so
 //!      there an unavailable one is reported and not failed; anywhere else it fails.
 //!
 //! Nothing here is a benchmark, and no timing is asserted — a CI runner's clock is not a fact
@@ -719,9 +719,10 @@ unsafe fn receive(ctx: *mut AVCodecContext, frame: *mut AVFrame, stream: &Stream
         }
         let hashing = Instant::now();
         if (*frame).format == AVPixelFormat_AV_PIX_FMT_VIDEOTOOLBOX as c_int {
-            // The picture is the media engine's; its samples are copied out to be hashed, into
-            // the planar-interleaved format VideoToolbox decoded to (NV12, or P010 for 10-bit).
+            // The picture is VideoToolbox's; its samples are copied out to be hashed, into the
+            // planar-interleaved format VideoToolbox decoded to (NV12, or P010 for 10-bit).
             let mut copy = av_frame_alloc();
+            assert!(!copy.is_null(), "av_frame_alloc returned null");
             check(av_hwframe_transfer_data(copy, frame, 0), "av_hwframe_transfer_data");
             run.frames.push(frame_hash(&*copy, stream));
             run.hardware += 1;
