@@ -198,9 +198,11 @@ pictures in display order — every one but the picture the cut landed in, which
 On macOS it decodes both streams once more through the VideoToolbox hwaccel, and requires every
 picture to be a VideoToolbox one — so FFmpeg's own decoder cannot pass for it — and, copied out and
 unpacked from NV12 or P010, to match the same reference to the bit. That proves the hwaccel path,
-not the hardware: VideoToolbox is free to decode HEVC in software, and the test does not ask. A virtual
-Mac (`kern.hv_vmm_present`) may have no hardware decoder to reach, and there an unavailable one is
-reported and not failed; on any other Mac it fails.
+not the hardware: VideoToolbox is free to decode HEVC in software, and the test does not ask. On a
+virtual Mac (`kern.hv_vmm_present`) VideoToolbox's result is reported and not checked: it may have
+no decoder to reach, and a macOS 26 guest of an M2 Max decoded the 10-bit stream exactly and not
+one picture of the 8-bit stream, which its host decodes exactly. On any other Mac a shortfall
+fails.
 
 ## Local loop
 
