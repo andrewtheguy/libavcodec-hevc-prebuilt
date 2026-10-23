@@ -4,7 +4,7 @@
 # then link, test and run the consumer binary. When this file and the workflow disagree, the
 # workflow is right and this is stale — it exists to say what CI will say before CI is asked.
 #
-# PowerShell 7. Installs nothing; the machine is provisioned by remotex's ci/windows/provision.ps1.
+# PowerShell 7. Installs nothing; the machine is provisioned by zDesk's ci/windows/provision.ps1.
 $ErrorActionPreference = 'Stop'
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $repo = (Get-Location).Path
